@@ -1,9 +1,10 @@
-// Headless harness for the custom F-91W segment decoder: crops each image to the
-// time band, binarises (shared logic), runs decodeSegments, scores against the
-// filename label, and saves an annotated overlay to tools/out/*-decode.png so we
-// can see exactly what the decoder detected and tune it.
+// Headless harness for the custom F-91W segment decoder: feeds each WHOLE image
+// (downscaled to a working size) to decodeSegments — which auto-detects the LCD —
+// scores against the filename label, and saves an annotated overlay to
+// tools/out/*-decode.png so we can see what it detected and tune it.
 //
 //   npm run harness
+//   FRAC=1 npm run harness   # also print per-segment ink fractions
 //
 // Images: tools/fixtures/ (licensed) + tools/local/ (gitignored scratch).
 // Label times in the filename with hyphens: anything_10-42-15_24h.jpg.
@@ -12,36 +13,15 @@ import { readdirSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join, dirname, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createCanvas, loadImage } from '@napi-rs/canvas'
-import { cropToPixels, type NormCrop } from '../src/recognize/geometry.ts'
 import { decodeSegments } from '../src/recognize/segments.ts'
 import { drawDecodeOverlay } from '../src/recognize/overlay.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const OUT = join(HERE, 'out')
 const IMG_RE = /\.(png|jpe?g|webp)$/i
-const MIN_WIDTH = 600
-
-// Per-fixture time-band crops (normalised), estimated from the images and keyed
-// by a filename substring. With LCD-anchoring the decoder tolerates surround in
-// the crop, so these are deliberately generous — they only need to *contain* the
-// time band; the decoder locks onto the LCD within. Tune against tools/out/.
-const CROPS: Record<string, NormCrop> = {
-  'time-noretouch': { cx: 0.56, cy: 0.5, w: 0.58, h: 0.18 },
-  'front-closeup': { cx: 0.49, cy: 0.56, w: 0.37, h: 0.16 },
-  '5051': { cx: 0.52, cy: 0.49, w: 0.58, h: 0.16 },
-  'all-segments': { cx: 0.49, cy: 0.49, w: 0.44, h: 0.14 },
-  // Broader set (tools/local): two clean fronts + two deliberately hard angles.
-  'cand-1': { cx: 0.49, cy: 0.47, w: 0.44, h: 0.14 }, // angled — perspective, expected hard
-  'cand-2': { cx: 0.49, cy: 0.52, w: 0.64, h: 0.2 },
-  'cand-3': { cx: 0.49, cy: 0.52, w: 0.64, h: 0.2 },
-  'cand-4': { cx: 0.5, cy: 0.82, w: 0.62, h: 0.1 },
-}
-
-function cropFor(file: string): NormCrop | null {
-  const name = basename(file)
-  for (const key of Object.keys(CROPS)) if (name.includes(key)) return CROPS[key]
-  return null
-}
+// Downscale so the longest side is at most this — mirrors what the app feeds the
+// decoder (a phone frame, not full-res) and keeps the flood fill fast.
+const WORK_MAX = 1600
 
 interface Expected {
   hh: number
@@ -76,32 +56,19 @@ async function main(): Promise<void> {
 
   for (const file of files) {
     const expected = expectedFromName(file)
-    const crop = cropFor(file)
     const img = await loadImage(file)
 
-    let dw: number
-    let dh: number
-    let sx = 0
-    let sy = 0
-    let sw = img.width
-    let sh = img.height
-    if (crop) {
-      const rect = cropToPixels(crop, img.width, img.height)
-      sx = rect.x
-      sy = rect.y
-      sw = rect.w
-      sh = rect.h
-    }
-    const scale = sw < MIN_WIDTH ? MIN_WIDTH / sw : 1
-    dw = Math.round(sw * scale)
-    dh = Math.round(sh * scale)
+    const longest = Math.max(img.width, img.height)
+    const scale = longest > WORK_MAX ? WORK_MAX / longest : 1
+    const dw = Math.round(img.width * scale)
+    const dh = Math.round(img.height * scale)
 
     const canvas = createCanvas(dw, dh)
     const ctx = canvas.getContext('2d')
-    ctx.drawImage(img, sx, sy, sw, sh, 0, 0, dw, dh)
+    ctx.drawImage(img, 0, 0, dw, dh)
     const id = ctx.getImageData(0, 0, dw, dh)
 
-    // decodeSegments owns binarisation now; feed it the raw cropped RGBA.
+    // Feed the whole (downscaled) frame; decodeSegments finds the LCD itself.
     const { reading, debug } = decodeSegments(id.data, dw, dh)
 
     // Paint the decoder's final ink mask as the overlay background, so the boxes

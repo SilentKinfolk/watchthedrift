@@ -17,20 +17,28 @@ later as a PWA.
 | Camera capture (rear cam, 4K-ideal, timestamped) | ✅ done |
 | NTP-style time sync (timeapi.io + fallbacks, RTT-compensated) | ✅ done, unit-tested |
 | Drift maths (nearest-mod-period, 12h/24h, wrap) | ✅ done, unit-tested |
-| Recognition (reading the digits) | 🟡 **works on clean front-on shots; wired into the app** — see below |
+| Recognition (reading the digits) | 🟡 **auto-detects & reads clean shots; live on-device** — see below |
 | PWA install/offline | ⏸ on hold (deliberately) |
 
-**Status of reading:** the custom F-91W segment decoder is now the **primary
-engine in the live app** (`SegmentDecoderRecognizer`, with `TesseractRecognizer`
-behind it as a lazy fallback via `CascadeRecognizer`). The front-end is now
-**LCD-anchored** (locks onto the bright LCD panel, so the dark case/bezel and
-loose framing no longer break it) — this took the harness from 0/7 to reading
-every clean front-on shot. Remaining misses are faint/degraded segments, the
-small seconds-units digit under tight framing, and angled/perspective shots
-(see "Known limits"). Those fail *safe* (retake), except a genuinely-faint
-segment that can read as a confident off-by-one — needs a clear retake on a real
-watch. Next real iteration is **on-device** with `?debug=1` (now shows the
-decoder's LCD/band/cell boxes over the binarised crop).
+**Status of reading:** the custom F-91W segment decoder is the engine, and it now
+**auto-detects the LCD** anywhere in the frame — no alignment box. It binarises,
+collects the largest bright (non-ink) regions as candidate panels, decodes each,
+and keeps the one that yields a valid `HH:MM:SS`; bright background/walls/windows
+are rejected because only the real display decodes. So the app feeds it the whole
+(downscaled) capture and the user just points at the watch. Confirmed on the
+harness by feeding **full-frame** watch photos (watch + strap + background): it
+locks onto the LCD with no crop. Same read rate as before on the fixtures (the
+clean front-on shots), since the leftover misses are pre-existing: faint/degraded
+segments, the small seconds-units digit, and angled/perspective shots (see "Known
+limits"). All fail *safe* (retake) except a genuinely-faint segment that can read
+as a confident off-by-one. `?debug=1` overlays the auto-detected LCD/band/cells.
+
+Tesseract is **no longer wired in**: it can't read a full-frame capture (it OCRs
+the whole image, not the located display), and running it as a fallback would
+only add a wasm-load delay before an inevitable retake. `TesseractRecognizer` +
+`CascadeRecognizer` are kept in the tree for a *better* future fallback — running
+Tesseract on the decoder's **detected LCD crop** (`debug.lcd`). Dropping it from
+the bundle also cut it from ~38 kB to ~19 kB.
 
 ## How to run
 ```sh
@@ -52,41 +60,45 @@ Deploy: push to `main` → GitHub Actions builds and publishes to Pages.
   - **`segments.ts` — the custom F-91W 7-segment decoder (the algorithm; primary).**
     Pure, shared with the harness; takes the raw crop and owns binarisation.
   - **`SegmentDecoderRecognizer.ts` — wraps `segments.ts` as the primary `Recognizer`.**
-  - `CascadeRecognizer.ts` — runs engines in order (decoder → Tesseract), first
-    confident read wins; the app uses this.
-  - `TesseractRecognizer.ts` — now the lazy fallback (wasm loads only if reached).
-  - `binarize.ts` — `toGray` + Otsu (used by the decoder and the Tesseract preprocess).
+  - `CascadeRecognizer.ts` / `TesseractRecognizer.ts` — **currently unwired.** Kept
+    for a possible future fallback: run Tesseract on the decoder's *detected* LCD
+    crop (`debug.lcd`) when the segment read fails.
+  - `binarize.ts` — `toGray` + Otsu (shared by the decoder and `preprocess`).
   - `overlay.ts` — shared decode-overlay renderer (harness PNGs + app `?debug=1`).
-  - `preprocess.ts` — crop + scale + binarise (debug view + Tesseract input).
-  - `geometry.ts` — alignment-box / crop fractions.
-  - `parse.ts` — OCR-text → HH:MM:SS (used by the Tesseract path).
+  - `preprocess.ts` — crop + scale (down to ≤1600 px longest side) + binarise.
+  - `geometry.ts` — the capture region (`TIME_CROP`): now a large, forgiving
+    fraction of the frame, not a tight align box.
+  - `parse.ts` — OCR-text → HH:MM:SS (Tesseract-path helper; idle while unwired).
 - `tools/ocr-harness.ts` — headless harness; reads `tools/fixtures/` + `tools/local/` (both gitignored images), decodes, scores vs filename labels, writes annotated overlays to `tools/out/`.
 - `.github/workflows/deploy.yml` — Pages deploy.
 
 ## The recognition engine (what + how)
 **It is a hand-written, pure-TypeScript algorithm — no ML, no cloud, no API.** It
 implements the classic seven-segment-OCR approach (à la `ssocr`), tailored to the
-F-91W's fixed layout. `decodeSegments(rgba, w, h)` takes the **raw crop** and owns
-all binarisation:
+F-91W's fixed layout. `decodeSegments(rgba, w, h)` takes the **whole frame** and
+owns all binarisation:
 1. **Binarise** with global Otsu → dark digits AND dark case/bezel become ink.
-2. **Isolate the LCD** = the largest connected region of *bright* (non-ink) pixels.
-   This is the key idea: the bezel and the digits are both dark, so we can't trim a
-   "black frame"; instead we anchor on the bright LCD background, which excludes the
-   surround no matter how the watch is framed. Decoding is confined to that box.
+2. **Auto-detect candidate LCDs** = the largest connected regions of *bright*
+   (non-ink) pixels. The bezel and the digits are both dark, so we anchor on the
+   bright LCD background, not a "black frame"; bright things elsewhere in the frame
+   just become extra candidates. Each candidate runs steps 3–6.
 3. **Find the digit band** — the tallest horizontal band of ink = the big `HH:MM`.
 4. **Split into cells** by column gaps → individual digits + the colon.
 5. **Read each digit** by sampling its seven segment regions (each on/off by ink
    fraction) and mapping the 7-bit pattern to a digit via a lookup table.
-6. **Assemble** `HH:MM:SS` using the colon as the anchor (after it = MM then SS).
+6. **Assemble & verify** `HH:MM:SS` (colon as anchor). Keep the candidate with the
+   highest-confidence valid in-range time — only the real display produces one, so
+   non-LCD candidates are rejected here. That decode-to-verify step is what lets
+   framing be free: point at the watch, no box.
 
 (We also tried OR-ing an adaptive local threshold into step 1 to recover faint
 segments, but the F-91W LCD's faint background mottling reads as speckle under any
 setting aggressive enough to help — global Otsu is simpler and more reliable.)
 
-**Current result:** every **clean front-on** shot in the harness now reads
-correctly (e.g. `15:53:08`, `14:37:51`, conf ~0.71); the harness went 0/7 → 3/7,
-where the 3 are exactly the front-on labelled shots. The decoder is wired into the
-app as the primary engine. Misses left:
+**Current result:** auto-detect validated on the harness by feeding **full-frame**
+photos (watch + strap + background): it locks onto the LCD with no crop and reads
+every clean front-on shot (e.g. `15:53:08`, `14:37:51`, conf ~0.71). Misses left
+(all pre-existing, none from auto-detect):
 - a **genuinely faint/degraded segment** (`19:45:08`→`09`): no ink there to read —
   unrecoverable by thresholding; on a real watch this is a retake.
 - the **small seconds-units digit** under tight 12h framing (`5051`): column-gap
@@ -96,11 +108,12 @@ app as the primary engine. Misses left:
   on a skewed glyph.
 
 ### Next steps
-1. **On-device pass (the real iteration).** Open the live app with `?debug=1`: it
-   now overlays the decoder's LCD/band/cell boxes on the binarised crop. Use the
-   live `W/H` controls to size the alignment box to the time band, and read the
-   decode string. Tune `TIME_CROP` defaults and the segment constants in
-   `segments.ts` from what real photos show.
+1. **On-device pass (the real iteration).** Just point at the watch — no alignment.
+   With `?debug=1` the binarised frame is overlaid with the auto-detected
+   LCD/band/cell boxes + the decode string, so failures are easy to diagnose. Tune
+   the candidate filters / segment constants in `segments.ts` from what real photos
+   show. (`?debug=1` still exposes `W/H` to shrink the capture region if a bright
+   background nearby ever distracts detection — rarely needed.)
 2. **Seconds robustness** (the main accuracy gap for drift): make the small
    seconds cells robust — e.g. snap them to a consistent height/baseline, or the
    originally-planned **colon-anchored fixed-pitch** layout for the whole row.

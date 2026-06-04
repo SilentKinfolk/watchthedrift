@@ -1,8 +1,6 @@
 import { Camera, type CameraError } from '../camera/Camera'
 import { TimeSync } from '../time/TimeSync'
 import { SegmentDecoderRecognizer } from '../recognize/SegmentDecoderRecognizer'
-import { TesseractRecognizer } from '../recognize/TesseractRecognizer'
-import { CascadeRecognizer } from '../recognize/CascadeRecognizer'
 import { drawDecodeOverlay } from '../recognize/overlay'
 import { preprocess } from '../recognize/preprocess'
 import { TIME_CROP, cropToPixels, cropOverride, type NormCrop, type PixelRect } from '../recognize/geometry'
@@ -17,10 +15,9 @@ export class Screen {
   private readonly root: HTMLElement
   private readonly camera = new Camera()
   private readonly time = new TimeSync()
-  // Purpose-built F-91W decoder first; Tesseract as a lazy fallback. Keep the
-  // decoder instance to read its debug overlay in ?debug=1.
-  private readonly decoder = new SegmentDecoderRecognizer()
-  private readonly recognizer = new CascadeRecognizer([this.decoder, new TesseractRecognizer()])
+  // The F-91W segment decoder auto-detects the LCD in the whole frame, so we feed
+  // it the full capture (no precise crop) and let it find the watch.
+  private readonly recognizer = new SegmentDecoderRecognizer()
   private readonly debug = isDebug()
 
   private state: State = 'idle'
@@ -106,7 +103,7 @@ export class Screen {
       case 'preview':
         this.setSub(
           this.retakeMsg ||
-            'Fit just the time row (HH:MM:SS) inside the box — the rest of the watch can stay outside it. Hold steady, then measure.',
+            'Point the camera at your watch so the time shows clearly — no need to line it up. Hold about a hand away so it stays in focus, then Measure.',
         )
         this.retakeMsg = ''
         this.controls.append(this.btn('Measure', () => void this.measure()), this.modeToggle())
@@ -162,14 +159,16 @@ export class Screen {
       }
       this.setSub('Reading the dial…')
 
-      const rect = cropToPixels(TIME_CROP, cap.width, cap.height)
+      // Crop to the (large, forgiving) capture region, then decode — the decoder
+      // auto-detects the LCD inside it; no precise alignment needed.
+      const rect = cropToPixels(this.crop, cap.width, cap.height)
       const pre = preprocess(cap.canvas, rect)
       const rec = await this.recognizer.recognize({ canvas: pre.canvas, is24h: this.is24h })
 
       if (this.debug) {
         // Annotate the binarised crop with the decoder's LCD/band/cell boxes —
         // the key view for dialling in framing on a real watch.
-        const dbg = this.decoder.lastDebug
+        const dbg = this.recognizer.lastDebug
         const dctx = dbg && pre.canvas.getContext('2d')
         if (dbg && dctx) drawDecodeOverlay(dctx, dbg)
         renderDebug(this.debugBox, {

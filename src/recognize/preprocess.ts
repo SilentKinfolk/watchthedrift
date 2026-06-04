@@ -13,8 +13,11 @@ export interface Preprocessed {
   threshold: number
 }
 
-/** Upscale small crops so OCR has enough pixels to work with. */
+/** Upscale tiny crops so there are enough pixels to work with. */
 const MIN_OCR_WIDTH = 600
+/** Downscale big captures (we feed the decoder a large region) so the longest
+ *  side is at most this — keeps the flood fill fast and matches the harness. */
+const MAX_DECODE_LONGEST = 1600
 
 export function preprocess(source: HTMLCanvasElement, crop: PixelRect): Preprocessed {
   const sx = Math.max(0, Math.min(crop.x, source.width - 1))
@@ -22,7 +25,10 @@ export function preprocess(source: HTMLCanvasElement, crop: PixelRect): Preproce
   const sw = Math.max(1, Math.min(crop.w, source.width - sx))
   const sh = Math.max(1, Math.min(crop.h, source.height - sy))
 
-  const scale = sw < MIN_OCR_WIDTH ? MIN_OCR_WIDTH / sw : 1
+  const longest = Math.max(sw, sh)
+  let scale = 1
+  if (sw < MIN_OCR_WIDTH) scale = MIN_OCR_WIDTH / sw
+  else if (longest > MAX_DECODE_LONGEST) scale = MAX_DECODE_LONGEST / longest
   const dw = Math.round(sw * scale)
   const dh = Math.round(sh * scale)
 
