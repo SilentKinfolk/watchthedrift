@@ -1,35 +1,32 @@
-// Headless OCR harness: runs the recognition pipeline over a folder of F-91W
-// images so we can iterate on accuracy without a phone, and build up labelled
-// test data. Reuses the app's own crop + binarise + parse logic, crops to the
-// time band (full-image OCR is hopeless), and saves each binarised crop to
-// tools/out/ so we can eyeball what the reader actually sees.
+// Headless harness for the custom F-91W segment decoder: crops each image to the
+// time band, binarises (shared logic), runs decodeSegments, scores against the
+// filename label, and saves an annotated overlay to tools/out/*-decode.png so we
+// can see exactly what the decoder detected and tune it.
 //
 //   npm run harness
 //
-// Images: tools/fixtures/ (licensed) and tools/local/ (gitignored scratch).
-// Encode the expected time in the filename to score it, with hyphens:
-//   anything_10-42-15_24h.jpg  →  expect 10:42:15, 24-hour ("12h" ⇒ 12-hour).
+// Images: tools/fixtures/ (licensed) + tools/local/ (gitignored scratch).
+// Label times in the filename with hyphens: anything_10-42-15_24h.jpg.
 
 import { readdirSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join, dirname, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { createWorker, PSM } from 'tesseract.js'
 import { createCanvas, loadImage } from '@napi-rs/canvas'
-import { parseTime } from '../src/recognize/parse.ts'
 import { binarize } from '../src/recognize/binarize.ts'
 import { cropToPixels, type NormCrop } from '../src/recognize/geometry.ts'
+import { decodeSegments } from '../src/recognize/segments.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const OUT = join(HERE, 'out')
 const IMG_RE = /\.(png|jpe?g|webp)$/i
-const MIN_OCR_WIDTH = 600
+const MIN_WIDTH = 600
 
 // Per-fixture time-band crops (normalised), estimated from the images and keyed
-// by a filename substring. Tune these against the saved crops in tools/out/.
+// by a filename substring. Tune against the overlays in tools/out/.
 const CROPS: Record<string, NormCrop> = {
-  'time-noretouch': { cx: 0.55, cy: 0.52, w: 0.64, h: 0.17 },
-  'front-closeup': { cx: 0.48, cy: 0.56, w: 0.42, h: 0.16 },
-  '5051': { cx: 0.5, cy: 0.49, w: 0.42, h: 0.11 },
+  'time-noretouch': { cx: 0.56, cy: 0.49, w: 0.58, h: 0.14 },
+  'front-closeup': { cx: 0.49, cy: 0.56, w: 0.37, h: 0.15 },
+  '5051': { cx: 0.5, cy: 0.49, w: 0.4, h: 0.12 },
 }
 
 function cropFor(file: string): NormCrop | null {
@@ -42,14 +39,10 @@ interface Expected {
   hh: number
   mm: number
   ss: number
-  is24h: boolean
 }
-
 function expectedFromName(file: string): Expected | null {
-  const name = basename(file)
-  const m = name.match(/(\d{1,2})-(\d{2})-(\d{2})/)
-  if (!m) return null
-  return { hh: +m[1], mm: +m[2], ss: +m[3], is24h: !/12h/i.test(name) }
+  const m = basename(file).match(/(\d{1,2})-(\d{2})-(\d{2})/)
+  return m ? { hh: +m[1], mm: +m[2], ss: +m[3] } : null
 }
 
 const fmt = (t: { hh: number; mm: number; ss: number }): string => {
@@ -70,69 +63,75 @@ async function main(): Promise<void> {
   }
   mkdirSync(OUT, { recursive: true })
 
-  const langPath = join(HERE, '..', 'public', 'traineddata')
-  const worker = await createWorker('digits', 1, { langPath, gzip: false })
-  await worker.setParameters({
-    tessedit_char_whitelist: '0123456789:',
-    tessedit_pageseg_mode: PSM.SINGLE_LINE,
-  })
-
   let correct = 0
   let labelled = 0
 
   for (const file of files) {
     const expected = expectedFromName(file)
-    const is24h = expected?.is24h ?? true
     const crop = cropFor(file)
-
     const img = await loadImage(file)
 
     let dw: number
     let dh: number
-    const canvas = (() => {
-      if (crop) {
-        const rect = cropToPixels(crop, img.width, img.height)
-        const scale = rect.w < MIN_OCR_WIDTH ? MIN_OCR_WIDTH / rect.w : 1
-        dw = Math.round(rect.w * scale)
-        dh = Math.round(rect.h * scale)
-        const c = createCanvas(dw, dh)
-        const ctx = c.getContext('2d')
-        ctx.drawImage(img, rect.x, rect.y, rect.w, rect.h, 0, 0, dw, dh)
-        const id = ctx.getImageData(0, 0, dw, dh)
-        binarize(id.data, dw, dh)
-        ctx.putImageData(id, 0, 0)
-        return c
+    let sx = 0
+    let sy = 0
+    let sw = img.width
+    let sh = img.height
+    if (crop) {
+      const rect = cropToPixels(crop, img.width, img.height)
+      sx = rect.x
+      sy = rect.y
+      sw = rect.w
+      sh = rect.h
+    }
+    const scale = sw < MIN_WIDTH ? MIN_WIDTH / sw : 1
+    dw = Math.round(sw * scale)
+    dh = Math.round(sh * scale)
+
+    const canvas = createCanvas(dw, dh)
+    const ctx = canvas.getContext('2d')
+    ctx.drawImage(img, sx, sy, sw, sh, 0, 0, dw, dh)
+    const id = ctx.getImageData(0, 0, dw, dh)
+    binarize(id.data, dw, dh)
+    ctx.putImageData(id, 0, 0)
+
+    const { reading, debug } = decodeSegments(id.data, dw, dh)
+
+    // Annotated overlay.
+    ctx.lineWidth = 2
+    const rect = (b: { x: number; y: number; w: number; h: number }, color: string) => {
+      ctx.strokeStyle = color
+      ctx.strokeRect(b.x, b.y, b.w, b.h)
+    }
+    rect(debug.trim, 'red')
+    if (debug.bigBand) rect(debug.bigBand, 'deepskyblue')
+    ctx.font = '28px sans-serif'
+    for (const c of debug.cells) {
+      rect(c, c.kind === 'colon' ? 'orange' : c.digit != null ? 'lime' : 'magenta')
+      if (c.digit != null) {
+        ctx.fillStyle = 'red'
+        ctx.fillText(String(c.digit), c.x + 2, Math.max(22, c.y - 3))
       }
-      dw = img.width
-      dh = img.height
-      const c = createCanvas(dw, dh)
-      c.getContext('2d').drawImage(img, 0, 0)
-      return c
-    })()
-
-    const outPath = join(OUT, `${basename(file).replace(IMG_RE, '')}-crop.png`)
+    }
+    const outPath = join(OUT, `${basename(file).replace(IMG_RE, '')}-decode.png`)
     writeFileSync(outPath, canvas.toBuffer('image/png'))
-
-    const text = ((await worker.recognize(canvas.toBuffer('image/png'))).data.text ?? '').trim()
-    const parsed = parseTime(text, is24h)
 
     let mark = ''
     if (expected) {
       labelled++
       const ok =
-        !!parsed && parsed.hh === expected.hh && parsed.mm === expected.mm && parsed.ss === expected.ss
+        !!reading && reading.hh === expected.hh && reading.mm === expected.mm && reading.ss === expected.ss
       if (ok) correct++
       mark = ok ? '  ✓' : '  ✗'
     }
-
-    console.log(`\n=== ${basename(file)} ${expected ? `(expect ${fmt(expected)} ${expected.is24h ? '24h' : '12h'})${mark}` : ''}`)
-    console.log(`  image ${img.width}×${img.height}, crop ${crop ? JSON.stringify(crop) : 'none'} → ${dw}×${dh}`)
-    console.log(`  OCR: ${JSON.stringify(text)}  →  ${parsed ? fmt(parsed) : 'no parse'}`)
-    console.log(`  saved: tools/out/${basename(outPath)}`)
+    const cellStr = debug.cells.map((c) => (c.kind === 'colon' ? ':' : (c.digit ?? '?'))).join('')
+    console.log(`\n=== ${basename(file)} ${expected ? `(expect ${fmt(expected)})${mark}` : ''}`)
+    console.log(`  ${dw}×${dh}  note:${debug.note}  conf:${reading ? reading.confidence.toFixed(2) : '-'}`)
+    console.log(`  decoded: ${reading ? fmt(reading) : 'none'}   cells:[${cellStr}]`)
+    console.log(`  overlay: tools/out/${basename(outPath)}`)
   }
 
-  await worker.terminate()
-  if (labelled > 0) console.log(`\n${correct}/${labelled} labelled images read correctly.`)
+  if (labelled > 0) console.log(`\n${correct}/${labelled} read correctly.`)
 }
 
 main().catch((e) => {
