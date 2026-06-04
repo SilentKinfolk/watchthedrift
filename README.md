@@ -19,7 +19,7 @@ A quartz watch like the F-91W slowly drifts out of sync with real time. It's spe
 
 ### A note on precision
 
-A single photo can pin the offset to about **±0.5 s**, because the watch only displays whole seconds (when it shows `:15`, it's really somewhere in `15.0`–`16.0`). That's plenty to see you're several seconds off. A future refinement (watching the live video for the digit to tick over) can push this well below half a second.
+The watch shows whole seconds, so the answer is to the nearest second — which is all you need to decide whether to nudge it. (The midpoint of the displayed second is used, so a correctly-set watch reads `0 s` rather than appearing half a second slow.) You'll only see a margin of error if the app can't reach a reliable time reference — in which case it tells you.
 
 ### Privacy
 
@@ -45,7 +45,7 @@ Pushing to `main` builds the site and deploys it to GitHub Pages via the workflo
 Early days — built iteratively.
 
 - **v1 (in progress):** end-to-end camera → OCR → NTP → drift, deployed as an installable PWA.
-- **Later:** a purpose-built F-91W segment decoder for higher reliability; sub-0.5 s accuracy via live tick detection; support for other digital watches.
+- **Later:** a purpose-built F-91W segment decoder for higher OCR reliability; support for other digital watch models.
 
 Deliberately **out of scope:** storing history, logging, charts, or drift-rate tracking — this answers one ephemeral question and nothing more.
 
