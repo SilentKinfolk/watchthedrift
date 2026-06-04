@@ -1,10 +1,11 @@
 // Where the time digits sit, and how the on-screen alignment guide is shaped.
 //
-// First-pass values: the user fills the guide with the watch's time display, so
-// we crop a centred band of the captured frame. These constants WILL be tuned
-// against real F-91W photos using the debug view — that's expected iteration,
-// and they're deliberately isolated here (the Phase-2 segment decoder reuses
-// the same geometry).
+// The guide box and this crop are the SAME rectangle: the viewfinder's
+// aspect-ratio is set to the live camera frame's, so the on-screen box maps 1:1
+// to the cropped pixels. We crop just the HH:MM:SS band (wide and short) — the
+// rest of the watch can sit outside it. The defaults are a starting point to be
+// tuned against real F-91W photos; in debug you can override them live with
+// ?crop=w,h,cx,cy (fractions 0..1) without rebuilding.
 
 export interface NormCrop {
   cx: number
@@ -20,12 +21,8 @@ export interface PixelRect {
   h: number
 }
 
-/** Centred region of the frame expected to contain HH:MM:SS (normalised 0..1). */
-export const TIME_CROP: NormCrop = { cx: 0.5, cy: 0.5, w: 0.86, h: 0.42 }
-
-/** Aspect ratio (w / h) of the on-screen alignment guide — roughly the F-91W's
- *  time-digit band. */
-export const GUIDE_ASPECT = 2.0
+/** Centred band of the frame holding HH:MM:SS (normalised 0..1). Wide & short. */
+export const TIME_CROP: NormCrop = { cx: 0.5, cy: 0.52, w: 0.6, h: 0.22 }
 
 export function cropToPixels(c: NormCrop, frameW: number, frameH: number): PixelRect {
   const w = Math.round(c.w * frameW)
@@ -36,4 +33,14 @@ export function cropToPixels(c: NormCrop, frameW: number, frameH: number): Pixel
     w,
     h,
   }
+}
+
+/** Debug crop override from ?crop=w,h,cx,cy (fractions). null if absent/invalid. */
+export function cropOverride(): NormCrop | null {
+  const raw = new URLSearchParams(location.search).get('crop')
+  if (!raw) return null
+  const parts = raw.split(',').map(Number)
+  if (parts.length !== 4 || parts.some((n) => !Number.isFinite(n))) return null
+  const [w, h, cx, cy] = parts
+  return { w, h, cx, cy }
 }

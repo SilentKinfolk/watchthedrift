@@ -20,15 +20,17 @@ export class Camera {
     return this.stream !== null
   }
 
-  async start(video: HTMLVideoElement): Promise<Result<void, CameraError>> {
+  async start(video: HTMLVideoElement): Promise<Result<{ width: number; height: number }, CameraError>> {
     if (!window.isSecureContext) return err('insecure-context')
     if (!navigator.mediaDevices?.getUserMedia) return err('unavailable')
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: { ideal: 'environment' },
-          width: { ideal: 1920 },
-          height: { ideal: 1080 },
+          // Ask for as much resolution as the device will give — a watch held at
+          // the camera's focusing distance is small in frame, so detail matters.
+          width: { ideal: 3840 },
+          height: { ideal: 2160 },
         },
         audio: false,
       })
@@ -38,7 +40,7 @@ export class Camera {
       video.setAttribute('playsinline', '') // iOS: keep the preview inline, no fullscreen
       video.muted = true
       await video.play()
-      return ok(undefined)
+      return ok({ width: video.videoWidth, height: video.videoHeight })
     } catch (e) {
       const name = (e as DOMException)?.name
       if (name === 'NotAllowedError' || name === 'SecurityError') return err('denied')

@@ -2,7 +2,7 @@ import { Camera, type CameraError } from '../camera/Camera'
 import { TimeSync } from '../time/TimeSync'
 import { TesseractRecognizer } from '../recognize/TesseractRecognizer'
 import { preprocess } from '../recognize/preprocess'
-import { TIME_CROP, cropToPixels } from '../recognize/geometry'
+import { TIME_CROP, cropToPixels, cropOverride, type NormCrop, type PixelRect } from '../recognize/geometry'
 import { computeDrift, type DriftResult } from '../drift/Drift'
 import { isDebug, renderDebug } from './DebugView'
 
@@ -22,9 +22,11 @@ export class Screen {
   private recognizerReady = false
   private retakeMsg = ''
   private lastDrift: DriftResult | null = null
+  private crop: NormCrop = cropOverride() ?? TIME_CROP
 
   private video!: HTMLVideoElement
   private viewfinder!: HTMLElement
+  private guide!: HTMLElement
   private answer!: HTMLElement
   private sub!: HTMLElement
   private cond!: HTMLElement
@@ -56,16 +58,29 @@ export class Screen {
     `
     this.viewfinder = this.q('.viewfinder')
     this.video = this.q('video')
+    this.guide = this.q('.guide')
     this.answer = this.q('.answer')
     this.sub = this.q('.sub')
     this.cond = this.q('.cond')
     this.controls = this.q('.controls')
     this.debugBox = this.q('.debug')
+    this.applyGuide()
     this.setState('idle')
   }
 
   private q<T extends HTMLElement>(sel: string): T {
     return this.root.querySelector(sel) as T
+  }
+
+  /** Position the alignment box from the crop fractions. Because the viewfinder's
+   *  aspect-ratio is set to the camera frame's, on-screen fractions map 1:1 to
+   *  frame fractions — so what's framed is exactly what gets cropped for OCR. */
+  private applyGuide(): void {
+    const c = this.crop
+    this.guide.style.left = `${(c.cx - c.w / 2) * 100}%`
+    this.guide.style.top = `${(c.cy - c.h / 2) * 100}%`
+    this.guide.style.width = `${c.w * 100}%`
+    this.guide.style.height = `${c.h * 100}%`
   }
 
   private setState(state: State): void {
@@ -83,7 +98,10 @@ export class Screen {
         this.setSub('Starting the camera…')
         break
       case 'preview':
-        this.setSub(this.retakeMsg || 'Line the time up inside the guide, hold steady, then measure.')
+        this.setSub(
+          this.retakeMsg ||
+            'Fit just the time row (HH:MM:SS) inside the box — the rest of the watch can stay outside it. Hold steady, then measure.',
+        )
         this.retakeMsg = ''
         this.controls.append(this.btn('Measure', () => void this.measure()), this.modeToggle())
         break
@@ -107,6 +125,8 @@ export class Screen {
     this.setState('starting')
     const res = await this.camera.start(this.video)
     if (res.ok) {
+      this.viewfinder.style.aspectRatio = `${res.value.width} / ${res.value.height}`
+      this.applyGuide()
       this.retakeMsg = ''
       this.setState('preview')
     } else {
@@ -141,10 +161,12 @@ export class Screen {
 
       if (this.debug) {
         renderDebug(this.debugBox, {
+          original: cropCanvas(cap.canvas, rect, 480),
           preprocessed: pre.canvas,
           raw: rec.ok ? rec.value.raw : rec.raw ?? '',
           confidence: rec.ok ? rec.value.confidence : undefined,
           threshold: pre.threshold,
+          crop: this.crop,
         })
         this.debugBox.hidden = false
       }
@@ -274,4 +296,18 @@ function cameraErrorMessage(e: CameraError): string {
     case 'unavailable':
       return 'This browser doesn’t support camera access.'
   }
+}
+
+/** Build a downscaled colour crop of the captured frame, for the debug view. */
+function cropCanvas(source: HTMLCanvasElement, rect: PixelRect, maxW: number): HTMLCanvasElement {
+  const sx = Math.max(0, Math.min(rect.x, source.width - 1))
+  const sy = Math.max(0, Math.min(rect.y, source.height - 1))
+  const sw = Math.max(1, Math.min(rect.w, source.width - sx))
+  const sh = Math.max(1, Math.min(rect.h, source.height - sy))
+  const scale = sw > maxW ? maxW / sw : 1
+  const c = document.createElement('canvas')
+  c.width = Math.round(sw * scale)
+  c.height = Math.round(sh * scale)
+  c.getContext('2d')!.drawImage(source, sx, sy, sw, sh, 0, 0, c.width, c.height)
+  return c
 }

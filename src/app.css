@@ -205,12 +205,9 @@ a:hover {
 
 /* Alignment guide drawn over the live preview. White with a thin black outline
    so it reads against any background, in keeping with the B&W look. */
+/* Position + size set inline from the crop fractions (see Screen.applyGuide). */
 .guide {
   position: absolute;
-  inset: 0;
-  margin: auto;
-  width: 86%;
-  height: 56%;
   border: 2px solid #fff;
   outline: 1px solid #000;
   pointer-events: none;
@@ -259,4 +256,21 @@ a:hover {
   white-space: pre-wrap;
   word-break: break-all;
   color: #333;
+}
+
+.debug-share {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+
+.debug-fallback {
+  width: 100%;
+  height: 90px;
+  margin-top: 10px;
+  font-family: ui-monospace, 'Courier New', Courier, monospace;
+  font-size: 0.7rem;
+  word-break: break-all;
 }
