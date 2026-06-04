@@ -24,9 +24,14 @@ const MIN_WIDTH = 600
 // Per-fixture time-band crops (normalised), estimated from the images and keyed
 // by a filename substring. Tune against the overlays in tools/out/.
 const CROPS: Record<string, NormCrop> = {
-  'time-noretouch': { cx: 0.56, cy: 0.49, w: 0.58, h: 0.14 },
-  'front-closeup': { cx: 0.49, cy: 0.56, w: 0.37, h: 0.15 },
+  'time-noretouch': { cx: 0.56, cy: 0.5, w: 0.58, h: 0.18 },
+  'front-closeup': { cx: 0.49, cy: 0.56, w: 0.37, h: 0.16 },
   '5051': { cx: 0.5, cy: 0.49, w: 0.4, h: 0.12 },
+  // Broader set (tools/local): two clean fronts + two deliberately hard angles.
+  'cand-1': { cx: 0.45, cy: 0.44, w: 0.5, h: 0.14 },
+  'cand-2': { cx: 0.49, cy: 0.52, w: 0.64, h: 0.2 },
+  'cand-3': { cx: 0.49, cy: 0.52, w: 0.64, h: 0.2 },
+  'cand-4': { cx: 0.46, cy: 0.7, w: 0.52, h: 0.12 },
 }
 
 function cropFor(file: string): NormCrop | null {
