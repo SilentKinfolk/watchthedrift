@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm --version)",
+      "Bash(git --version)",
+      "Bash(gh auth *)",
+      "Bash(gh api *)",
+      "WebSearch"
+    ]
+  }
+}
