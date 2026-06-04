@@ -27,10 +27,12 @@ export class Camera {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: { ideal: 'environment' },
-          // Ask for as much resolution as the device will give — a watch held at
-          // the camera's focusing distance is small in frame, so detail matters.
-          width: { ideal: 3840 },
-          height: { ideal: 2160 },
+          // 1080p, not 4K. We downscale to ~1600px for decoding anyway, so 4K
+          // buys no accuracy — and a sustained 4K preview makes phones throttle
+          // the frame rate after a few seconds. 1080p keeps the preview smooth
+          // and still resolves the LCD digits with room to spare.
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
         },
         audio: false,
       })
