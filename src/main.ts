@@ -1,4 +1,5 @@
 import './app.css'
+import { Screen } from './ui/Screen'
 
-// Behaviour lands in later steps (camera, time sync, OCR, drift). For now the
-// page is the static shell in index.html; this entry just pulls in the styles.
+const root = document.querySelector<HTMLElement>('#app')
+if (root) new Screen(root)

@@ -191,3 +191,72 @@ a:hover {
 .credits a {
   color: #777;
 }
+
+/* ---- app UI: camera, controls, result, debug ---- */
+
+.controls {
+  display: flex;
+  gap: 16px;
+  justify-content: center;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 14px;
+}
+
+/* Alignment guide drawn over the live preview. White with a thin black outline
+   so it reads against any background, in keeping with the B&W look. */
+.guide {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 86%;
+  height: 56%;
+  border: 2px solid #fff;
+  outline: 1px solid #000;
+  pointer-events: none;
+}
+
+.mode {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 0.85rem;
+  color: #777;
+}
+
+.mode-label {
+  color: #999;
+}
+
+/* Debug view (only when ?debug=1) */
+.debug {
+  margin: 18px auto 0;
+  max-width: 600px;
+  text-align: left;
+}
+
+.debug-title {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: #999;
+}
+
+.debug-canvas {
+  display: block;
+  max-width: 100%;
+  margin: 8px 0;
+  border: 1px solid #000;
+  image-rendering: pixelated;
+}
+
+.debug-meta {
+  margin: 0;
+  padding: 8px;
+  background: #f3f3f3;
+  font-family: ui-monospace, 'Courier New', Courier, monospace;
+  font-size: 0.75rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: #333;
+}

@@ -1,0 +1,277 @@
+import { Camera, type CameraError } from '../camera/Camera'
+import { TimeSync } from '../time/TimeSync'
+import { TesseractRecognizer } from '../recognize/TesseractRecognizer'
+import { preprocess } from '../recognize/preprocess'
+import { TIME_CROP, cropToPixels } from '../recognize/geometry'
+import { computeDrift, type DriftResult } from '../drift/Drift'
+import { isDebug, renderDebug } from './DebugView'
+
+type State = 'idle' | 'starting' | 'preview' | 'measuring' | 'result' | 'error'
+
+// The whole single-screen app. Holds a stable DOM skeleton (so the live <video>
+// survives state changes) and swaps text / buttons / visibility per state.
+export class Screen {
+  private readonly root: HTMLElement
+  private readonly camera = new Camera()
+  private readonly time = new TimeSync()
+  private readonly recognizer = new TesseractRecognizer()
+  private readonly debug = isDebug()
+
+  private state: State = 'idle'
+  private is24h = true
+  private recognizerReady = false
+  private retakeMsg = ''
+  private lastDrift: DriftResult | null = null
+
+  private video!: HTMLVideoElement
+  private viewfinder!: HTMLElement
+  private answer!: HTMLElement
+  private sub!: HTMLElement
+  private cond!: HTMLElement
+  private controls!: HTMLElement
+  private debugBox!: HTMLElement
+
+  constructor(root: HTMLElement) {
+    this.root = root
+    this.build()
+    // Sync the clock in the background while the user gets the camera going.
+    this.time
+      .sync()
+      .then(() => this.refreshCond())
+      .catch(() => {})
+  }
+
+  private build(): void {
+    this.root.innerHTML = `
+      <h1 class="question">How many seconds is your watch off?</h1>
+      <div class="viewfinder" hidden>
+        <video playsinline muted></video>
+        <div class="guide"></div>
+      </div>
+      <div class="answer" hidden></div>
+      <p class="sub"></p>
+      <p class="cond"></p>
+      <div class="controls"></div>
+      <div class="debug" hidden></div>
+    `
+    this.viewfinder = this.q('.viewfinder')
+    this.video = this.q('video')
+    this.answer = this.q('.answer')
+    this.sub = this.q('.sub')
+    this.cond = this.q('.cond')
+    this.controls = this.q('.controls')
+    this.debugBox = this.q('.debug')
+    this.setState('idle')
+  }
+
+  private q<T extends HTMLElement>(sel: string): T {
+    return this.root.querySelector(sel) as T
+  }
+
+  private setState(state: State): void {
+    this.state = state
+    this.viewfinder.hidden = !(state === 'preview' || state === 'measuring')
+    this.answer.hidden = state !== 'result'
+    this.controls.innerHTML = ''
+
+    switch (state) {
+      case 'idle':
+        this.setSub('Point your phone at your Casio F-91W and measure how far it has drifted from real time.')
+        this.controls.append(this.btn('Start camera', () => void this.startCamera()))
+        break
+      case 'starting':
+        this.setSub('Starting the camera…')
+        break
+      case 'preview':
+        this.setSub(this.retakeMsg || 'Line the time up inside the guide, hold steady, then measure.')
+        this.retakeMsg = ''
+        this.controls.append(this.btn('Measure', () => void this.measure()), this.modeToggle())
+        break
+      case 'measuring':
+        // sub text is managed inside measure()
+        break
+      case 'result': {
+        const d = this.lastDrift!
+        this.answer.textContent = formatBig(d)
+        this.setSub(formatSub(d))
+        this.controls.append(this.btn('Measure again', () => this.setState('preview')))
+        break
+      }
+      case 'error':
+        break
+    }
+    this.refreshCond()
+  }
+
+  private async startCamera(): Promise<void> {
+    this.setState('starting')
+    const res = await this.camera.start(this.video)
+    if (res.ok) {
+      this.retakeMsg = ''
+      this.setState('preview')
+    } else {
+      this.showError(res.error)
+    }
+  }
+
+  private async measure(): Promise<void> {
+    if (this.state === 'measuring') return
+    this.setState('measuring')
+    try {
+      if (!this.time.current) {
+        this.setSub('Checking the time…')
+        await this.time.sync()
+        this.refreshCond()
+      }
+
+      // Capture (and timestamp) first — everything after this is post-capture.
+      const cap = this.camera.capture()
+      const trueUtc = this.time.trueUtcAt(cap.perfTimestamp)
+
+      if (!this.recognizerReady) {
+        this.setSub('Preparing the reader (first run only)…')
+        await this.recognizer.init()
+        this.recognizerReady = true
+      }
+      this.setSub('Reading the dial…')
+
+      const rect = cropToPixels(TIME_CROP, cap.width, cap.height)
+      const pre = preprocess(cap.canvas, rect)
+      const rec = await this.recognizer.recognize({ canvas: pre.canvas, is24h: this.is24h })
+
+      if (this.debug) {
+        renderDebug(this.debugBox, {
+          preprocessed: pre.canvas,
+          raw: rec.ok ? rec.value.raw : rec.raw ?? '',
+          confidence: rec.ok ? rec.value.confidence : undefined,
+          threshold: pre.threshold,
+        })
+        this.debugBox.hidden = false
+      }
+
+      if (!rec.ok) {
+        this.retakeMsg = retakeMessage(rec.reason)
+        this.setState('preview')
+        return
+      }
+
+      this.lastDrift = computeDrift(
+        rec.value,
+        trueUtc.epochMs,
+        trueUtc.uncertaintyMs,
+        new Date().getTimezoneOffset(),
+        this.is24h,
+      )
+      this.setState('result')
+    } catch {
+      this.retakeMsg = 'Something went wrong reading that — try again.'
+      this.setState('preview')
+    }
+  }
+
+  private showError(e: CameraError): void {
+    this.state = 'error'
+    this.viewfinder.hidden = true
+    this.answer.hidden = true
+    this.controls.innerHTML = ''
+    this.setSub(cameraErrorMessage(e))
+    if (e === 'denied' || e === 'no-camera') {
+      this.controls.append(this.btn('Try again', () => void this.startCamera()))
+    }
+    this.refreshCond()
+  }
+
+  private btn(label: string, onClick: () => void): HTMLButtonElement {
+    const b = document.createElement('button')
+    b.className = 'btn'
+    b.textContent = label
+    b.addEventListener('click', onClick)
+    return b
+  }
+
+  private modeToggle(): HTMLElement {
+    const wrap = document.createElement('span')
+    wrap.className = 'mode'
+    const label = document.createElement('span')
+    label.className = 'mode-label'
+    label.textContent = 'watch mode:'
+    wrap.appendChild(label)
+
+    const make = (text: string, is24h: boolean): HTMLButtonElement => {
+      const b = document.createElement('button')
+      b.className = 'textlink'
+      b.textContent = text
+      b.setAttribute('aria-pressed', String(this.is24h === is24h))
+      b.addEventListener('click', () => {
+        this.is24h = is24h
+        wrap.querySelectorAll('button').forEach((btn) => {
+          btn.setAttribute('aria-pressed', String((btn.textContent === '24h') === this.is24h))
+        })
+      })
+      return b
+    }
+    wrap.append(make('12h', false), make('24h', true))
+    return wrap
+  }
+
+  private setSub(text: string): void {
+    this.sub.textContent = text
+  }
+
+  private refreshCond(): void {
+    this.cond.textContent = this.timeStatusText()
+  }
+
+  private timeStatusText(): string {
+    const o = this.time.current
+    if (!o) return 'checking the time…'
+    if (o.degraded) {
+      return '⚠ couldn’t reach a time server — using this device’s clock, so treat the result as rough.'
+    }
+    const names: Record<string, string> = {
+      timeapi: 'timeapi.io',
+      cloudflare: 'Cloudflare',
+      'date-header': 'the server clock',
+      device: 'this device',
+    }
+    return `time checked against ${names[o.source] ?? o.source}`
+  }
+}
+
+function formatBig(d: DriftResult): string {
+  const n = Math.round(d.offsetSec)
+  if (n === 0) return '0 s'
+  return `${n > 0 ? '+' : '−'}${Math.abs(n)} s`
+}
+
+function formatSub(d: DriftResult): string {
+  const n = Math.round(d.offsetSec)
+  if (n === 0) return 'Spot on — no drift to the nearest second.'
+  const unit = Math.abs(n) === 1 ? 'second' : 'seconds'
+  const word = d.direction === 'fast' ? 'fast' : 'slow'
+  return `Your watch is ${Math.abs(n)} ${unit} ${word}.`
+}
+
+function retakeMessage(reason: 'low-confidence' | 'no-digits' | 'engine-error'): string {
+  switch (reason) {
+    case 'low-confidence':
+      return 'Couldn’t read that confidently — line the digits up in the guide, avoid glare, and try again.'
+    case 'no-digits':
+      return 'Couldn’t find the time in that shot — fill the guide with the HH:MM:SS digits and try again.'
+    case 'engine-error':
+      return 'The reader hit a snag — try again.'
+  }
+}
+
+function cameraErrorMessage(e: CameraError): string {
+  switch (e) {
+    case 'denied':
+      return 'Camera permission was denied. This tool reads the watch on your device — nothing is uploaded. Allow the camera and try again.'
+    case 'no-camera':
+      return 'No usable camera was found on this device.'
+    case 'insecure-context':
+      return 'The camera needs a secure (https) connection.'
+    case 'unavailable':
+      return 'This browser doesn’t support camera access.'
+  }
+}
