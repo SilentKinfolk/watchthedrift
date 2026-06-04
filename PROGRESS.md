@@ -14,6 +14,7 @@ later as a PWA.
 | --- | --- |
 | Hosting (GitHub Pages + Actions auto-deploy) | ✅ done |
 | UI / single-screen state machine (B&W) | ✅ done |
+| Capture flow | ✅ **live scan** (point-and-catch; locks when two reads agree) |
 | Camera capture (rear cam, 1080p, timestamped) | ✅ done |
 | NTP-style time sync (timeapi.io + fallbacks, RTT-compensated) | ✅ done, unit-tested |
 | Drift maths (nearest-mod-period, 12h/24h, wrap) | ✅ done, unit-tested |
@@ -34,6 +35,20 @@ limits"). All fail *safe* (retake) except a genuinely-faint segment that can rea
 as a confident off-by-one. `?debug=1` shows the detected LCD — cropped and
 locally binarised, with its band/cell boxes — plus the colour scene, so failures
 are easy to read off.
+
+**Capture is now a live scan, not a single tap** (`Screen.ts`). Tap *Scan* and it
+decodes frames continuously (self-paced loop, ~6/s, no overlap) and **locks the
+moment two reads taken ≥0.4 s apart agree on the drift** — point-and-catch, like a
+QR scanner. This is *more* reliable than one tap (it tries many frames until one is
+sharp/head-on) and *more* trustworthy (the agree-twice check rejects random
+misreads: an honest watch ticks in step with real time, so two true reads match).
+**Timing is unaffected**: every frame is timestamped at the grab, and the winning
+frame's timestamp is what's compared to NTP — same precision as a single shot.
+Tuning constants (`SCAN_*` in `Screen.ts`) are first guesses to refine on-device.
+Caveat: the decode runs on the main thread; if the preview stutters on slower
+phones, move it to a Web Worker (the obvious next optimisation). A systematic
+per-watch misread (e.g. a stuck-faint segment biasing every frame the same way)
+can still slip the agree-twice check — that's the ML-reader's job, not this.
 
 Tesseract is **no longer wired in**: it can't read a full-frame capture (it OCRs
 the whole image, not the located display), and running it as a fallback would

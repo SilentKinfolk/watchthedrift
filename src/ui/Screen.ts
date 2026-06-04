@@ -7,7 +7,15 @@ import { TIME_CROP, cropToPixels, cropOverride, type NormCrop, type PixelRect } 
 import { computeDrift, type DriftResult } from '../drift/Drift'
 import { isDebug, renderDebug } from './DebugView'
 
-type State = 'idle' | 'starting' | 'preview' | 'measuring' | 'result' | 'error'
+type State = 'idle' | 'starting' | 'preview' | 'scanning' | 'result' | 'error'
+
+// Live-scan tuning. We decode frames continuously and lock once two reads agree.
+const SCAN_GAP_MS = 150 // pause between decode attempts (self-paced, no overlap)
+const SCAN_MIN_PAIR_MS = 400 // two corroborating reads must be ≥ this far apart in time
+const SCAN_AGREE_S = 1.0 // …and their drift must match within this many seconds
+const SCAN_SAMPLE_WINDOW_MS = 4000 // forget reads older than this when corroborating
+const SCAN_HINT_AFTER_MS = 7000 // nudge the user if nothing has read by now
+const DEBUG_RENDER_GAP_MS = 350 // throttle the ?debug overlay while scanning
 
 // The whole single-screen app. Holds a stable DOM skeleton (so the live <video>
 // survives state changes) and swaps text / buttons / visibility per state.
@@ -22,10 +30,16 @@ export class Screen {
 
   private state: State = 'idle'
   private is24h = true
-  private recognizerReady = false
-  private retakeMsg = ''
   private lastDrift: DriftResult | null = null
   private crop: NormCrop = cropOverride() ?? TIME_CROP
+
+  // Live-scan loop state.
+  private scanning = false
+  private scanTimer: ReturnType<typeof setTimeout> | null = null
+  private scanStartedAt = 0
+  private lastDebugAt = 0
+  /** Recent valid reads (drift + capture time) for the agree-twice cross-check. */
+  private samples: Array<{ offsetSec: number; at: number }> = []
 
   private video!: HTMLVideoElement
   private viewfinder!: HTMLElement
@@ -87,8 +101,9 @@ export class Screen {
   }
 
   private setState(state: State): void {
+    if (state !== 'scanning') this.stopScan()
     this.state = state
-    this.viewfinder.hidden = !(state === 'preview' || state === 'measuring')
+    this.viewfinder.hidden = !(state === 'preview' || state === 'scanning')
     this.answer.hidden = state !== 'result'
     this.controls.innerHTML = ''
 
@@ -101,22 +116,19 @@ export class Screen {
         this.setSub('Starting the camera…')
         break
       case 'preview':
-        this.setSub(
-          this.retakeMsg ||
-            'Point the camera at your watch so the time shows clearly — no need to line it up. Hold about a hand away so it stays in focus, then Measure.',
-        )
-        this.retakeMsg = ''
-        this.controls.append(this.btn('Measure', () => void this.measure()), this.modeToggle())
+        this.setSub('Point at your watch and tap Scan — it finds the time on its own, no lining up.')
+        this.controls.append(this.btn('Scan', () => void this.startScan()), this.modeToggle())
         if (this.debug) this.controls.append(this.sizeControls())
         break
-      case 'measuring':
-        // sub text is managed inside measure()
+      case 'scanning':
+        this.setSub('Scanning… hold the camera over your watch.')
+        this.controls.append(this.btn('Stop', () => this.setState('preview')))
         break
       case 'result': {
         const d = this.lastDrift!
         this.answer.textContent = formatBig(d)
         this.setSub(formatSub(d))
-        this.controls.append(this.btn('Measure again', () => this.setState('preview')))
+        this.controls.append(this.btn('Scan again', () => void this.startScan()))
         break
       }
       case 'error':
@@ -131,68 +143,99 @@ export class Screen {
     if (res.ok) {
       this.viewfinder.style.aspectRatio = `${res.value.width} / ${res.value.height}`
       this.applyGuide()
-      this.retakeMsg = ''
       this.setState('preview')
     } else {
       this.showError(res.error)
     }
   }
 
-  private async measure(): Promise<void> {
-    if (this.state === 'measuring') return
-    this.setState('measuring')
+  /** Begin continuously decoding frames until two reads agree (point-and-catch). */
+  private async startScan(): Promise<void> {
+    if (this.state === 'scanning') return
+    // Make sure the clock sync is in flight; processFrame waits for it to land.
+    if (!this.time.current) this.time.sync().then(() => this.refreshCond()).catch(() => {})
+    await this.recognizer.init() // instant for the segment decoder
+    this.samples = []
+    this.scanning = true
+    this.scanStartedAt = performance.now()
+    this.setState('scanning')
+    void this.scanTick()
+  }
+
+  private stopScan(): void {
+    this.scanning = false
+    if (this.scanTimer != null) {
+      clearTimeout(this.scanTimer)
+      this.scanTimer = null
+    }
+  }
+
+  /** One self-paced scan step: decode a frame, then schedule the next (no overlap). */
+  private async scanTick(): Promise<void> {
+    if (!this.scanning) return
     try {
-      if (!this.time.current) {
-        this.setSub('Checking the time…')
-        await this.time.sync()
-        this.refreshCond()
-      }
-
-      // Capture (and timestamp) first — everything after this is post-capture.
-      const cap = this.camera.capture()
-      const trueUtc = this.time.trueUtcAt(cap.perfTimestamp)
-
-      if (!this.recognizerReady) {
-        this.setSub('Preparing the reader (first run only)…')
-        await this.recognizer.init()
-        this.recognizerReady = true
-      }
-      this.setSub('Reading the dial…')
-
-      // Crop to the (large, forgiving) capture region, then decode — the decoder
-      // auto-detects the LCD inside it; no precise alignment needed.
-      const rect = cropToPixels(this.crop, cap.width, cap.height)
-      const pre = preprocess(cap.canvas, rect)
-      const rec = await this.recognizer.recognize({ canvas: pre.canvas, is24h: this.is24h })
-
-      if (this.debug) {
-        renderDebug(this.debugBox, {
-          scene: cropCanvas(cap.canvas, rect, 480),
-          decoded: this.decodedCanvas(),
-          raw: rec.ok ? rec.value.raw : rec.raw ?? '',
-          confidence: rec.ok ? rec.value.confidence : undefined,
-          crop: this.crop,
-        })
-        this.debugBox.hidden = false
-      }
-
-      if (!rec.ok) {
-        this.retakeMsg = retakeMessage(rec.reason)
-        this.setState('preview')
-        return
-      }
-
-      this.lastDrift = computeDrift(
-        rec.value,
-        trueUtc.epochMs,
-        trueUtc.uncertaintyMs,
-        new Date().getTimezoneOffset(),
-        this.is24h,
-      )
-      this.setState('result')
+      await this.processFrame()
     } catch {
-      this.retakeMsg = 'Something went wrong reading that — try again.'
-      this.setState('preview')
+      // A bad frame is fine — just try the next one.
+    }
+    if (this.scanning) this.scanTimer = setTimeout(() => void this.scanTick(), SCAN_GAP_MS)
+  }
+
+  /** Grab one timestamped frame, decode it, and lock once two reads corroborate.
+   *  The drift is computed from the frame's own capture instant, so "when the
+   *  picture was taken" is exact even though the video is live. */
+  private async processFrame(): Promise<void> {
+    if (!this.time.current) return // wait for the clock; keep scanning
+
+    // Timestamp at the grab — this frame is a self-contained (time, image) pair.
+    const cap = this.camera.capture()
+    const trueUtc = this.time.trueUtcAt(cap.perfTimestamp)
+    const rect = cropToPixels(this.crop, cap.width, cap.height)
+    const pre = preprocess(cap.canvas, rect)
+    const rec = await this.recognizer.recognize({ canvas: pre.canvas, is24h: this.is24h })
+    if (!this.scanning) return // stopped while we were decoding
+
+    if (this.debug && cap.perfTimestamp - this.lastDebugAt > DEBUG_RENDER_GAP_MS) {
+      this.lastDebugAt = cap.perfTimestamp
+      renderDebug(this.debugBox, {
+        scene: cropCanvas(cap.canvas, rect, 480),
+        decoded: this.decodedCanvas(),
+        raw: rec.ok ? rec.value.raw : rec.raw ?? '',
+        confidence: rec.ok ? rec.value.confidence : undefined,
+        crop: this.crop,
+      })
+      this.debugBox.hidden = false
+    }
+
+    if (!rec.ok) {
+      if (performance.now() - this.scanStartedAt > SCAN_HINT_AFTER_MS && this.samples.length === 0) {
+        this.setSub('Still looking — make sure the time is well-lit and fills a good part of the view.')
+      }
+      return
+    }
+
+    const drift = computeDrift(
+      rec.value,
+      trueUtc.epochMs,
+      trueUtc.uncertaintyMs,
+      new Date().getTimezoneOffset(),
+      this.is24h,
+    )
+    const at = cap.perfTimestamp
+    // Lock when an earlier read (≥ SCAN_MIN_PAIR_MS ago) agrees on the drift — an
+    // honest watch ticks in step with real time, so two true reads match; a random
+    // misread lands somewhere else and is discarded.
+    const corroborated = this.samples.some(
+      (s) => at - s.at >= SCAN_MIN_PAIR_MS && Math.abs(s.offsetSec - drift.offsetSec) <= SCAN_AGREE_S,
+    )
+    this.samples.push({ offsetSec: drift.offsetSec, at })
+    this.samples = this.samples.filter((s) => at - s.at <= SCAN_SAMPLE_WINDOW_MS)
+
+    if (corroborated) {
+      this.lastDrift = drift
+      this.setState('result')
+    } else {
+      this.setSub('Got the time — hold steady…')
     }
   }
 
@@ -339,17 +382,6 @@ function formatSub(d: DriftResult): string {
   const unit = Math.abs(n) === 1 ? 'second' : 'seconds'
   const word = d.direction === 'fast' ? 'fast' : 'slow'
   return `Your watch is ${Math.abs(n)} ${unit} ${word}.`
-}
-
-function retakeMessage(reason: 'low-confidence' | 'no-digits' | 'engine-error'): string {
-  switch (reason) {
-    case 'low-confidence':
-      return 'Couldn’t read that confidently — line the digits up in the guide, avoid glare, and try again.'
-    case 'no-digits':
-      return 'Couldn’t find the time in that shot — fill the guide with the HH:MM:SS digits and try again.'
-    case 'engine-error':
-      return 'The reader hit a snag — try again.'
-  }
 }
 
 function cameraErrorMessage(e: CameraError): string {
