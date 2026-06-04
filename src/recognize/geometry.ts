@@ -22,7 +22,7 @@ export interface PixelRect {
 }
 
 /** Centred band of the frame holding HH:MM:SS (normalised 0..1). Wide & short. */
-export const TIME_CROP: NormCrop = { cx: 0.5, cy: 0.52, w: 0.6, h: 0.22 }
+export const TIME_CROP: NormCrop = { cx: 0.5, cy: 0.52, w: 0.4, h: 0.16 }
 
 export function cropToPixels(c: NormCrop, frameW: number, frameH: number): PixelRect {
   const w = Math.round(c.w * frameW)

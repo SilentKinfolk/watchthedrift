@@ -104,6 +104,7 @@ export class Screen {
         )
         this.retakeMsg = ''
         this.controls.append(this.btn('Measure', () => void this.measure()), this.modeToggle())
+        if (this.debug) this.controls.append(this.sizeControls())
         break
       case 'measuring':
         // sub text is managed inside measure()
@@ -236,6 +237,43 @@ export class Screen {
     return wrap
   }
 
+  /** Debug-only live box sizing, so the crop can be dialled in on-device. */
+  private sizeControls(): HTMLElement {
+    const wrap = document.createElement('span')
+    wrap.className = 'mode'
+    const readout = document.createElement('span')
+    readout.className = 'mode-label'
+    const update = (): void => {
+      this.applyGuide()
+      const c = this.crop
+      readout.textContent = `box ${c.w.toFixed(2)}×${c.h.toFixed(2)} @ ${c.cx.toFixed(2)},${c.cy.toFixed(2)}`
+    }
+    const adj = (dw: number, dh: number) => (): void => {
+      this.crop = {
+        ...this.crop,
+        w: clamp(this.crop.w + dw, 0.08, 1),
+        h: clamp(this.crop.h + dh, 0.05, 1),
+      }
+      update()
+    }
+    const link = (label: string, on: () => void): HTMLButtonElement => {
+      const b = document.createElement('button')
+      b.className = 'textlink'
+      b.textContent = label
+      b.addEventListener('click', on)
+      return b
+    }
+    wrap.append(
+      link('W−', adj(-0.04, 0)),
+      link('W+', adj(0.04, 0)),
+      link('H−', adj(0, -0.03)),
+      link('H+', adj(0, 0.03)),
+      readout,
+    )
+    update()
+    return wrap
+  }
+
   private setSub(text: string): void {
     this.sub.textContent = text
   }
@@ -258,6 +296,10 @@ export class Screen {
     }
     return `time checked against ${names[o.source] ?? o.source}`
   }
+}
+
+function clamp(n: number, lo: number, hi: number): number {
+  return Math.max(lo, Math.min(hi, n))
 }
 
 function formatBig(d: DriftResult): string {

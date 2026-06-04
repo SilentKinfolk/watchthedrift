@@ -5,3 +5,9 @@ dist-ssr
 .vite
 .DS_Store
 *.log
+tools/local/
+tools/out/
+tools/fixtures/*.jpg
+tools/fixtures/*.jpeg
+tools/fixtures/*.png
+tools/fixtures/*.webp
