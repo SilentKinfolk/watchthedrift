@@ -1,17 +1,20 @@
-// Optional diagnostics, shown only with ?debug=1 in the URL. Surfaces the
-// preprocessed (binarised) image plus the raw OCR text, confidence and
-// threshold — the things we'll stare at while tuning recognition.
+// Optional diagnostics, shown only with ?debug=1 in the URL. Surfaces the colour
+// scene the decoder saw, the cropped LCD it locked onto (binarised, with its
+// band/cell boxes), and the raw decode string + confidence — what we stare at
+// while tuning recognition on a real watch.
 
 export function isDebug(): boolean {
   return new URLSearchParams(location.search).has('debug')
 }
 
 export interface DebugInfo {
-  original?: HTMLCanvasElement
-  preprocessed: HTMLCanvasElement
+  /** Colour crop of the capture region — the whole scene the decoder searched. */
+  scene?: HTMLCanvasElement
+  /** The detected LCD, cropped + binarised + annotated (null if none found). */
+  decoded?: HTMLCanvasElement
   raw: string
   confidence?: number
-  threshold?: number
+  /** Capture-region fractions, for reference. */
   crop?: { cx: number; cy: number; w: number; h: number }
 }
 
@@ -23,22 +26,25 @@ export function renderDebug(container: HTMLElement, info: DebugInfo): void {
   title.textContent = 'debug — what the reader sees'
   container.appendChild(title)
 
-  if (info.original) {
-    container.appendChild(caption('raw crop'))
-    info.original.className = 'debug-canvas'
-    container.appendChild(info.original)
+  if (info.scene) {
+    container.appendChild(caption('scene (what the camera saw)'))
+    info.scene.className = 'debug-canvas'
+    container.appendChild(info.scene)
   }
-  container.appendChild(caption('binarised + decoder boxes (LCD/band/cells)'))
-  info.preprocessed.className = 'debug-canvas'
-  container.appendChild(info.preprocessed)
+  if (info.decoded) {
+    container.appendChild(caption('detected LCD (cropped, binarised + boxes)'))
+    info.decoded.className = 'debug-canvas'
+    container.appendChild(info.decoded)
+  } else {
+    container.appendChild(caption('no LCD detected in that frame'))
+  }
 
   const meta = document.createElement('pre')
   meta.className = 'debug-meta'
-  const lines = [`raw OCR: ${JSON.stringify(info.raw)}`]
+  const lines = [`decode: ${JSON.stringify(info.raw)}`]
   if (info.confidence != null) lines.push(`confidence: ${(info.confidence * 100).toFixed(0)}%`)
-  if (info.threshold != null) lines.push(`otsu threshold: ${info.threshold}`)
   if (info.crop) {
-    lines.push(`crop w,h,cx,cy: ${info.crop.w},${info.crop.h},${info.crop.cx},${info.crop.cy}`)
+    lines.push(`capture w,h,cx,cy: ${info.crop.w},${info.crop.h},${info.crop.cx},${info.crop.cy}`)
   }
   meta.textContent = lines.join('\n')
   container.appendChild(meta)
@@ -70,10 +76,12 @@ export function renderDebug(container: HTMLElement, info: DebugInfo): void {
 
   const share = document.createElement('div')
   share.className = 'debug-share'
-  if (info.original) {
-    share.appendChild(copyBtn('copy raw crop', () => info.original!.toDataURL('image/jpeg', 0.6)))
+  if (info.scene) {
+    share.appendChild(copyBtn('copy scene', () => info.scene!.toDataURL('image/jpeg', 0.6)))
   }
-  share.appendChild(copyBtn('copy binarised', () => info.preprocessed.toDataURL('image/png')))
+  if (info.decoded) {
+    share.appendChild(copyBtn('copy LCD', () => info.decoded!.toDataURL('image/png')))
+  }
   container.append(share, fallback)
 }
 

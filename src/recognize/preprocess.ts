@@ -1,16 +1,12 @@
 import type { PixelRect } from './geometry'
-import { binarize } from './binarize'
 
-// Crops the time region out of the captured frame and binarises it for OCR
-// (grayscale → Otsu threshold → black digits on white). Returns a canvas usable
-// both as the OCR input and as the debug-view image. The pixel work lives in
-// ./binarize so the Node OCR harness shares exactly the same logic.
+// Crops the capture region out of the camera frame and scales it to a workable
+// size. It does NOT binarise: the segment decoder owns binarisation (it needs the
+// grayscale to threshold each detected LCD locally), so we hand it the raw pixels.
 
 export interface Preprocessed {
   canvas: HTMLCanvasElement
   imageData: ImageData
-  /** The Otsu threshold chosen, for debugging. */
-  threshold: number
 }
 
 /** Upscale tiny crops so there are enough pixels to work with. */
@@ -40,8 +36,5 @@ export function preprocess(source: HTMLCanvasElement, crop: PixelRect): Preproce
   ctx.drawImage(source, sx, sy, sw, sh, 0, 0, dw, dh)
 
   const img = ctx.getImageData(0, 0, dw, dh)
-  const { threshold } = binarize(img.data, dw, dh)
-  ctx.putImageData(img, 0, 0)
-
-  return { canvas, imageData: img, threshold }
+  return { canvas, imageData: img }
 }

@@ -47,15 +47,17 @@ export interface CellDebug extends Box {
 }
 
 export interface DecodeDebug {
-  /** Working region the decoder operated within (the LCD interior). */
-  trim: Box
-  /** Raw detected LCD-panel bounding box, before inset. */
+  /** Frame-coords box of the chosen LCD candidate (where it was found). */
   lcd: Box | null
+  /** The cropped LCD that was decoded, binarised with its own local threshold —
+   *  the clean b&w to display (ink: 1 = dark), sized width×height. bigBand and
+   *  cells are in THESE crop coordinates. */
+  crop: { ink: Uint8Array; width: number; height: number } | null
+  /** Big-digit band, in crop coordinates. */
   bigBand: Box | null
+  /** Cells, in crop coordinates. */
   cells: CellDebug[]
   note: string
-  /** Final ink mask (1 = ink), for the harness overlay. */
-  ink?: Uint8Array
 }
 
 export interface DecodeResult {
@@ -102,33 +104,16 @@ export function decodeSegments(
 ): DecodeResult {
   const n = width * height
   const gray = toGray(data, width, height)
-  const otsu = otsuThreshold(histogram(gray), n)
 
-  // Global-Otsu ink: dark digits AND dark bezel → 1. (See header on why we don't
-  // also run an adaptive pass.)
+  // Detection pass: a global-Otsu mask over the whole frame (dark digits AND dark
+  // case/bezel → 1) just to LOCATE bright LCD candidates. Reading happens later,
+  // per candidate, on its own local threshold — so the dark watch body never
+  // muddies the digits' b&w.
+  const globalOtsu = otsuThreshold(histogram(gray), n)
   const ink = new Uint8Array(n)
-  for (let p = 0; p < n; p++) ink[p] = gray[p] <= otsu ? 1 : 0
-  const at = (x: number, y: number): number => ink[y * width + x]
+  for (let p = 0; p < n; p++) ink[p] = gray[p] <= globalOtsu ? 1 : 0
 
-  const rowFrac = (y: number, x0: number, x1: number): number => {
-    let s = 0
-    for (let x = x0; x < x1; x++) s += at(x, y)
-    return s / (x1 - x0)
-  }
-  const colFrac = (x: number, y0: number, y1: number): number => {
-    let s = 0
-    for (let y = y0; y < y1; y++) s += at(x, y)
-    return s / (y1 - y0)
-  }
-
-  const debug: DecodeDebug = {
-    trim: { x: 0, y: 0, w: width, h: height },
-    lcd: null,
-    bigBand: null,
-    cells: [],
-    note: '',
-    ink,
-  }
+  const debug: DecodeDebug = { lcd: null, crop: null, bigBand: null, cells: [], note: '' }
 
   // 1. Candidate LCD panels = the largest bright connected regions (biggest
   //    first). No tight crop required — we search the whole frame.
@@ -138,89 +123,119 @@ export function decodeSegments(
     return { reading: null, debug }
   }
 
-  // 2–4. Decode each candidate; keep the highest-confidence VALID reading. Only
-  //      the real display yields a valid HH:MM:SS, so other bright regions in the
-  //      frame (a wall, a window, paper) are rejected automatically.
-  let best: { reading: SegmentReading; region: RegionResult; lcd: Box } | null = null
+  // 2. Crop + locally binarise + decode each candidate; keep the highest-confidence
+  //    VALID reading. Only the real display yields a valid HH:MM:SS, so other bright
+  //    regions in the frame (a wall, a window, paper) are rejected automatically.
+  let best: CandidateResult | null = null
+  let bestConf = -1
   // Best partial decode, for the debug overlay when nothing reads cleanly — the
   // candidate with the most digit cells is almost always the real LCD (far more
   // useful to show than the largest blank bright blob).
-  let fallback: { region: RegionResult; lcd: Box } | null = null
+  let fallback: CandidateResult | null = null
   let fallbackDigits = -1
   for (const cand of candidates) {
-    const region = decodeRegion(at, rowFrac, colFrac, cand)
-    const digitCount = region.cells.reduce((k, c) => k + (c.digit != null ? 1 : 0), 0)
+    const r = decodeCandidate(gray, width, cand)
+    const digitCount = r.cells.reduce((k, c) => k + (c.digit != null ? 1 : 0), 0)
     if (digitCount > fallbackDigits) {
       fallbackDigits = digitCount
-      fallback = { region, lcd: cand }
+      fallback = r
     }
-    if (region.reading && (!best || region.reading.confidence > best.reading.confidence)) {
-      best = { reading: region.reading, region, lcd: cand }
+    if (r.reading && r.reading.confidence > bestConf) {
+      best = r
+      bestConf = r.reading.confidence
     }
   }
 
   const chosen = best ?? fallback!
   debug.lcd = chosen.lcd
-  debug.trim = chosen.region.trim
-  debug.bigBand = chosen.region.bigBand
-  debug.cells = chosen.region.cells
-  debug.note = best ? chosen.region.note : `none (${chosen.region.note})`
+  debug.crop = { ink: chosen.cropInk, width: chosen.cw, height: chosen.ch }
+  debug.bigBand = chosen.bigBand
+  debug.cells = chosen.cells
+  debug.note = best ? chosen.note : `none (${chosen.note})`
   return { reading: best ? best.reading : null, debug }
 }
 
-interface RegionResult {
+interface CandidateResult {
   reading: SegmentReading | null
-  trim: Box
+  /** The candidate's box in frame coordinates. */
+  lcd: Box
+  /** Locally-binarised crop of the candidate (1 = dark), sized cw×ch. */
+  cropInk: Uint8Array
+  cw: number
+  ch: number
+  /** Big-digit band + cells, in CROP coordinates. */
   bigBand: Box | null
   cells: CellDebug[]
   note: string
 }
 
 /**
- * Decode HH:MM:SS within one candidate LCD box: inset its rim, find the big-digit
- * band, split into cells + colon by column gaps, read each digit, assemble. A
- * candidate that isn't really a display fails one of these checks (no ink band /
- * no colon / out of range) and returns reading=null.
+ * Crop one candidate LCD box out of the grayscale frame, binarise it with its OWN
+ * Otsu threshold (so the digits separate cleanly from the LCD background, free of
+ * the dark watch body that dominates a whole-frame threshold), then decode:
+ * find the big-digit band, split into cells + colon by column gaps, read each
+ * digit, assemble. A candidate that isn't a display fails a check (no ink band /
+ * no colon / out of range) → reading=null. All boxes returned in crop coordinates.
  */
-function decodeRegion(
-  at: (x: number, y: number) => number,
-  rowFrac: (y: number, x0: number, x1: number) => number,
-  colFrac: (x: number, y0: number, y1: number) => number,
-  lcd: Box,
-): RegionResult {
+function decodeCandidate(gray: Uint8Array, width: number, lcd: Box): CandidateResult {
   const ins = Math.max(1, Math.round(Math.min(lcd.w, lcd.h) * 0.03))
-  const tx0 = lcd.x + ins
-  const ty0 = lcd.y + ins
-  const tx1 = lcd.x + lcd.w - ins
-  const ty1 = lcd.y + lcd.h - ins
-  const trim: Box = { x: tx0, y: ty0, w: tx1 - tx0, h: ty1 - ty0 }
+  const cx0 = lcd.x + ins
+  const cy0 = lcd.y + ins
+  const cw = lcd.w - 2 * ins
+  const ch = lcd.h - 2 * ins
   const cells: CellDebug[] = []
-  const fail = (note: string, bigBand: Box | null = null): RegionResult => ({
-    reading: null,
-    trim,
+  if (cw < 10 || ch < 10) {
+    return { reading: null, lcd, cropInk: new Uint8Array(0), cw: 0, ch: 0, bigBand: null, cells, note: 'lcd too small' }
+  }
+
+  // Local Otsu on just this crop → a threshold tuned to LCD-bg vs. digits.
+  const hist = new Array<number>(256).fill(0)
+  for (let y = 0; y < ch; y++) for (let x = 0; x < cw; x++) hist[gray[(cy0 + y) * width + (cx0 + x)]]++
+  const localOtsu = otsuThreshold(hist, cw * ch)
+  const cropInk = new Uint8Array(cw * ch)
+  for (let y = 0; y < ch; y++) {
+    for (let x = 0; x < cw; x++) cropInk[y * cw + x] = gray[(cy0 + y) * width + (cx0 + x)] <= localOtsu ? 1 : 0
+  }
+
+  const at = (x: number, y: number): number => cropInk[y * cw + x]
+  const rowFrac = (y: number, x0: number, x1: number): number => {
+    let s = 0
+    for (let x = x0; x < x1; x++) s += cropInk[y * cw + x]
+    return s / (x1 - x0)
+  }
+  const colFrac = (x: number, y0: number, y1: number): number => {
+    let s = 0
+    for (let y = y0; y < y1; y++) s += cropInk[y * cw + x]
+    return s / (y1 - y0)
+  }
+  const result = (reading: SegmentReading | null, bigBand: Box | null, note: string): CandidateResult => ({
+    reading,
+    lcd,
+    cropInk,
+    cw,
+    ch,
     bigBand,
     cells,
     note,
   })
-  if (trim.w < 10 || trim.h < 10) return fail('lcd too small')
 
   // 2. Tallest horizontal ink band = the big HH:MM digits.
   const rowMask: boolean[] = []
-  for (let y = ty0; y < ty1; y++) rowMask.push(rowFrac(y, tx0, tx1) > INK)
+  for (let y = 0; y < ch; y++) rowMask.push(rowFrac(y, 0, cw) > INK)
   const bands = runs(rowMask)
-  if (bands.length === 0) return fail('no ink bands')
+  if (bands.length === 0) return result(null, null, 'no ink bands')
   const big = bands.reduce((a, b) => (b.end - b.start > a.end - a.start ? b : a))
-  const by0 = ty0 + big.start
-  const by1 = ty0 + big.end
-  const bigBand: Box = { x: tx0, y: by0, w: trim.w, h: by1 - by0 }
+  const by0 = big.start
+  const by1 = big.end
+  const bigBand: Box = { x: 0, y: by0, w: cw, h: by1 - by0 }
 
   // 3. Split the band into column runs (digits + colon).
   const colMask: boolean[] = []
-  for (let x = tx0; x < tx1; x++) colMask.push(colFrac(x, by0, by1) > INK)
+  for (let x = 0; x < cw; x++) colMask.push(colFrac(x, by0, by1) > INK)
   const groups = runs(colMask)
-    .map((r) => tighten(at, tx0 + r.start, tx0 + r.end, by0, by1))
+    .map((r) => tighten(at, r.start, r.end, by0, by1))
     .filter((g) => g.w > 1 && g.h > 1)
-  if (groups.length === 0) return fail('no column groups', bigBand)
+  if (groups.length === 0) return result(null, bigBand, 'no column groups')
 
   // Classify by the tallest digit (the colon/seconds are shorter; the median
   // would be dragged down by them).
@@ -243,7 +258,7 @@ function decodeRegion(
     }
     // A "1" only inks its right side; widen the cell left to a full digit width.
     let cell: Box = g
-    if (narrow && tall) cell = { x: Math.max(tx0, g.x - Math.round(digW - g.w)), y: g.y, w: Math.round(digW), h: g.h }
+    if (narrow && tall) cell = { x: Math.max(0, g.x - Math.round(digW - g.w)), y: g.y, w: Math.round(digW), h: g.h }
     const { digit, conf, frac } = sampleDigit(at, cell)
     confSum += conf
     confN++
@@ -252,23 +267,23 @@ function decodeRegion(
   }
 
   digits.sort((a, b) => a.x - b.x)
-  if (colonX < 0) return fail('no colon found', bigBand)
+  if (colonX < 0) return result(null, bigBand, 'no colon found')
   // Left of the colon = hours; after it, always MM then SS, left-to-right.
   const hours = digits.filter((d) => d.x < colonX).map((d) => d.digit)
   const afterColon = digits.filter((d) => d.x > colonX).map((d) => d.digit)
   const minutes = afterColon.slice(0, 2)
   const seconds = afterColon.slice(2, 4)
   if (hours.length < 1 || minutes.length < 2 || seconds.length < 2) {
-    return fail(`parts h${hours.length} after${afterColon.length}`, bigBand)
+    return result(null, bigBand, `parts h${hours.length} after${afterColon.length}`)
   }
 
   const toNum = (ds: number[]): number => ds.slice(-2).reduce((a, d) => a * 10 + d, 0)
   const hh = toNum(hours)
   const mm = toNum(minutes)
   const ss = toNum(seconds)
-  if (hh > 23 || mm > 59 || ss > 59) return fail(`range ${hh}:${mm}:${ss}`, bigBand)
+  if (hh > 23 || mm > 59 || ss > 59) return result(null, bigBand, `range ${hh}:${mm}:${ss}`)
 
-  return { reading: { hh, mm, ss, confidence: confN ? confSum / confN : 0 }, trim, bigBand, cells, note: 'ok' }
+  return result({ hh, mm, ss, confidence: confN ? confSum / confN : 0 }, bigBand, 'ok')
 }
 
 /**

@@ -166,17 +166,11 @@ export class Screen {
       const rec = await this.recognizer.recognize({ canvas: pre.canvas, is24h: this.is24h })
 
       if (this.debug) {
-        // Annotate the binarised crop with the decoder's LCD/band/cell boxes —
-        // the key view for dialling in framing on a real watch.
-        const dbg = this.recognizer.lastDebug
-        const dctx = dbg && pre.canvas.getContext('2d')
-        if (dbg && dctx) drawDecodeOverlay(dctx, dbg)
         renderDebug(this.debugBox, {
-          original: cropCanvas(cap.canvas, rect, 480),
-          preprocessed: pre.canvas,
+          scene: cropCanvas(cap.canvas, rect, 480),
+          decoded: this.decodedCanvas(),
           raw: rec.ok ? rec.value.raw : rec.raw ?? '',
           confidence: rec.ok ? rec.value.confidence : undefined,
-          threshold: pre.threshold,
           crop: this.crop,
         })
         this.debugBox.hidden = false
@@ -200,6 +194,27 @@ export class Screen {
       this.retakeMsg = 'Something went wrong reading that — try again.'
       this.setState('preview')
     }
+  }
+
+  /** ?debug=1 image: the decoder's detected LCD, binarised, with its band/cell
+   *  boxes drawn on — so on a real watch you can see exactly what it locked onto. */
+  private decodedCanvas(): HTMLCanvasElement | undefined {
+    const dbg = this.recognizer.lastDebug
+    if (!dbg?.crop) return undefined
+    const { ink, width, height } = dbg.crop
+    const canvas = document.createElement('canvas')
+    canvas.width = width
+    canvas.height = height
+    const ctx = canvas.getContext('2d')!
+    const img = ctx.createImageData(width, height)
+    for (let p = 0, i = 0; p < ink.length; p++, i += 4) {
+      const v = ink[p] ? 0 : 255
+      img.data[i] = img.data[i + 1] = img.data[i + 2] = v
+      img.data[i + 3] = 255
+    }
+    ctx.putImageData(img, 0, 0)
+    drawDecodeOverlay(ctx, dbg)
+    return canvas
   }
 
   private showError(e: CameraError): void {

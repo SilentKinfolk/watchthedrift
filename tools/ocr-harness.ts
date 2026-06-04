@@ -63,29 +63,32 @@ async function main(): Promise<void> {
     const dw = Math.round(img.width * scale)
     const dh = Math.round(img.height * scale)
 
-    const canvas = createCanvas(dw, dh)
-    const ctx = canvas.getContext('2d')
-    ctx.drawImage(img, 0, 0, dw, dh)
-    const id = ctx.getImageData(0, 0, dw, dh)
+    const frame = createCanvas(dw, dh)
+    const fctx = frame.getContext('2d')
+    fctx.drawImage(img, 0, 0, dw, dh)
 
     // Feed the whole (downscaled) frame; decodeSegments finds the LCD itself.
-    const { reading, debug } = decodeSegments(id.data, dw, dh)
+    const { reading, debug } = decodeSegments(fctx.getImageData(0, 0, dw, dh).data, dw, dh)
 
-    // Paint the decoder's final ink mask as the overlay background, so the boxes
-    // sit on exactly what the decoder saw.
-    if (debug.ink) {
-      for (let p = 0, i = 0; p < debug.ink.length; p++, i += 4) {
-        const v = debug.ink[p] ? 0 : 255
-        id.data[i] = id.data[i + 1] = id.data[i + 2] = v
-        id.data[i + 3] = 255
-      }
-    }
-    ctx.putImageData(id, 0, 0)
-
-    // Annotated overlay (same renderer as the in-app ?debug=1 view).
-    drawDecodeOverlay(ctx as unknown as CanvasRenderingContext2D, debug)
+    // Overlay = the decoder's CROPPED LCD (locally binarised) with its boxes —
+    // same view as the in-app ?debug=1. Far more legible than the whole frame.
     const outPath = join(OUT, `${basename(file).replace(IMG_RE, '')}-decode.png`)
-    writeFileSync(outPath, canvas.toBuffer('image/png'))
+    if (debug.crop) {
+      const { ink, width: cw, height: ch } = debug.crop
+      const crop = createCanvas(cw, ch)
+      const cctx = crop.getContext('2d')
+      const cid = cctx.createImageData(cw, ch)
+      for (let p = 0, i = 0; p < ink.length; p++, i += 4) {
+        const v = ink[p] ? 0 : 255
+        cid.data[i] = cid.data[i + 1] = cid.data[i + 2] = v
+        cid.data[i + 3] = 255
+      }
+      cctx.putImageData(cid, 0, 0)
+      drawDecodeOverlay(cctx as unknown as CanvasRenderingContext2D, debug)
+      writeFileSync(outPath, crop.toBuffer('image/png'))
+    } else {
+      writeFileSync(outPath, frame.toBuffer('image/png'))
+    }
 
     let mark = ''
     if (expected) {
@@ -96,8 +99,9 @@ async function main(): Promise<void> {
       mark = ok ? '  ✓' : '  ✗'
     }
     const cellStr = debug.cells.map((c) => (c.kind === 'colon' ? ':' : (c.digit ?? '?'))).join('')
+    const lcd = debug.lcd ? `@${debug.lcd.x},${debug.lcd.y} ${debug.lcd.w}×${debug.lcd.h}` : '—'
     console.log(`\n=== ${basename(file)} ${expected ? `(expect ${fmt(expected)})${mark}` : ''}`)
-    console.log(`  ${dw}×${dh}  note:${debug.note}  conf:${reading ? reading.confidence.toFixed(2) : '-'}`)
+    console.log(`  ${dw}×${dh}  lcd:${lcd}  note:${debug.note}  conf:${reading ? reading.confidence.toFixed(2) : '-'}`)
     console.log(`  decoded: ${reading ? fmt(reading) : 'none'}   cells:[${cellStr}]`)
     if (process.env.FRAC) {
       for (const c of debug.cells) {

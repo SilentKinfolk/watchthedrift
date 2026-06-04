@@ -14,7 +14,7 @@ later as a PWA.
 | --- | --- |
 | Hosting (GitHub Pages + Actions auto-deploy) | ✅ done |
 | UI / single-screen state machine (B&W) | ✅ done |
-| Camera capture (rear cam, 4K-ideal, timestamped) | ✅ done |
+| Camera capture (rear cam, 1080p, timestamped) | ✅ done |
 | NTP-style time sync (timeapi.io + fallbacks, RTT-compensated) | ✅ done, unit-tested |
 | Drift maths (nearest-mod-period, 12h/24h, wrap) | ✅ done, unit-tested |
 | Recognition (reading the digits) | 🟡 **auto-detects & reads clean shots; live on-device** — see below |
@@ -31,7 +31,9 @@ locks onto the LCD with no crop. Same read rate as before on the fixtures (the
 clean front-on shots), since the leftover misses are pre-existing: faint/degraded
 segments, the small seconds-units digit, and angled/perspective shots (see "Known
 limits"). All fail *safe* (retake) except a genuinely-faint segment that can read
-as a confident off-by-one. `?debug=1` overlays the auto-detected LCD/band/cells.
+as a confident off-by-one. `?debug=1` shows the detected LCD — cropped and
+locally binarised, with its band/cell boxes — plus the colour scene, so failures
+are easy to read off.
 
 Tesseract is **no longer wired in**: it can't read a full-frame capture (it OCRs
 the whole image, not the located display), and running it as a fallback would
@@ -77,11 +79,14 @@ Deploy: push to `main` → GitHub Actions builds and publishes to Pages.
 implements the classic seven-segment-OCR approach (à la `ssocr`), tailored to the
 F-91W's fixed layout. `decodeSegments(rgba, w, h)` takes the **whole frame** and
 owns all binarisation:
-1. **Binarise** with global Otsu → dark digits AND dark case/bezel become ink.
-2. **Auto-detect candidate LCDs** = the largest connected regions of *bright*
-   (non-ink) pixels. The bezel and the digits are both dark, so we anchor on the
-   bright LCD background, not a "black frame"; bright things elsewhere in the frame
-   just become extra candidates. Each candidate runs steps 3–6.
+1. **Global Otsu** over the whole frame → a coarse ink mask used *only to locate*
+   bright regions (dark digits AND dark case/bezel become ink).
+2. **Auto-detect candidate LCDs** = the largest connected *bright* (non-ink)
+   regions. The bezel and digits are both dark, so we anchor on the bright LCD
+   background, not a "black frame"; bright things elsewhere just become extra
+   candidates. **Crop to each candidate and re-binarise that crop with its own
+   local Otsu** — so the digits separate cleanly from the LCD background, free of
+   the dark watch body that skews a whole-frame threshold — then run steps 3–6.
 3. **Find the digit band** — the tallest horizontal band of ink = the big `HH:MM`.
 4. **Split into cells** by column gaps → individual digits + the colon.
 5. **Read each digit** by sampling its seven segment regions (each on/off by ink
