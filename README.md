@@ -12,8 +12,8 @@ A quartz watch like the F-91W slowly drifts out of sync with real time. It's spe
 
 ## How it works
 
-1. **Camera** — live rear-camera preview with an alignment guide; capture a frame and timestamp the exact capture instant.
-2. **Read** — the 7-segment digits are recognised on-device (OCR). If the read isn't confident, it asks you to retake — no guessing.
+1. **Camera** — live rear-camera preview. Just point it at your watch; there's no box to line up.
+2. **Read** — a purpose-built F-91W seven-segment decoder finds the LCD in the frame and reads it on-device. It scans frames continuously and locks the instant two consecutive reads agree (so a stray misread is discarded), timestamping the exact moment of the winning frame.
 3. **Reference time** — an NTP-style time check over HTTPS with round-trip compensation pins "true" time to a few tens of milliseconds.
 4. **Drift** — the displayed time minus true time, shown with an honest uncertainty band.
 
@@ -42,10 +42,11 @@ Pushing to `main` builds the site and deploys it to GitHub Pages via the workflo
 
 ## Status & roadmap
 
-Early days — built iteratively.
+Built iteratively.
 
-- **v1 (in progress):** end-to-end camera → OCR → NTP → drift, deployed as an installable PWA.
-- **Later:** a purpose-built F-91W segment decoder for higher OCR reliability; support for other digital watch models.
+- **Working & live:** point-and-catch live scan → custom on-device F-91W segment decoder → NTP-style time check → drift, deployed to GitHub Pages.
+- **In progress:** reliability in dim light — the reflective LCD has no backlight, so it's hard to spot when it isn't bright; plus angled/perspective shots.
+- **Later:** installable PWA / offline use; support for other digital-watch models.
 
 Deliberately **out of scope:** storing history, logging, charts, or drift-rate tracking — this answers one ephemeral question and nothing more.
 

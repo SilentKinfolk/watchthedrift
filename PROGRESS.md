@@ -115,10 +115,17 @@ owns all binarisation:
 segments, but the F-91W LCD's faint background mottling reads as speckle under any
 setting aggressive enough to help — global Otsu is simpler and more reliable.)
 
-**Current result:** auto-detect validated on the harness by feeding **full-frame**
-photos (watch + strap + background): it locks onto the LCD with no crop and reads
-every clean front-on shot (e.g. `15:53:08`, `14:37:51`, conf ~0.71). Misses left
-(all pre-existing, none from auto-detect):
+**Current result:** confirmed working on a real F-91W in good light — point, and the
+live scan catches the time in a moment. Auto-detect was validated on the harness by
+feeding **full-frame** photos (watch + strap + background): it locks onto the LCD
+with no crop and reads every clean front-on shot (e.g. `15:53:08`, `14:37:51`, conf
+~0.71). Known misses:
+- **dim / low-contrast light (the current real-world blocker, on hold).** The F-91W's
+  reflective LCD has no backlight, so in dim light it barely out-shines the dark
+  case — and detection finds the LCD precisely *by* it being a bright patch, so it
+  can't isolate it, even when the screen is clearly legible to the eye (eyes adapt
+  locally + use colour; our grayscale brightness test doesn't). Symptom: `?debug=1`
+  shows a mostly-black crop / watch outline. See "Next steps #1".
 - a **genuinely faint/degraded segment** (`19:45:08`→`09`): no ink there to read —
   unrecoverable by thresholding; on a real watch this is a retake.
 - the **small seconds-units digit** under tight 12h framing (`5051`): column-gap
@@ -128,18 +135,26 @@ every clean front-on shot (e.g. `15:53:08`, `14:37:51`, conf ~0.71). Misses left
   on a skewed glyph.
 
 ### Next steps
-1. **On-device pass (the real iteration).** Just point at the watch — no alignment.
-   With `?debug=1` the binarised frame is overlaid with the auto-detected
-   LCD/band/cell boxes + the decode string, so failures are easy to diagnose. Tune
-   the candidate filters / segment constants in `segments.ts` from what real photos
-   show. (`?debug=1` still exposes `W/H` to shrink the capture region if a bright
-   background nearby ever distracts detection — rarely needed.)
+1. **Low-light / contrast robustness — HELD, next real-world priority.** In dim light
+   the reflective LCD doesn't register as a bright blob, so detection misses it.
+   Options, easiest→hardest: (a) press the watch's own **LIGHT** backlight while
+   scanning — zero code, instant contrast, also confirms the diagnosis; (b) a
+   **phone-torch toggle** while scanning (`track.applyConstraints({advanced:[{torch:true}]})`
+   — Android Chrome only; **iOS Safari can't**); (c) **widen detection** to multiple
+   brightness levels and/or a contrast-normalise (auto-levels) pass so a dim LCD
+   still surfaces. Best tuned against a **real failing frame** — capture one via
+   `?debug=1` → "copy scene" — rather than blind (no low-light fixtures yet).
 2. **Seconds robustness** (the main accuracy gap for drift): make the small
    seconds cells robust — e.g. snap them to a consistent height/baseline, or the
    originally-planned **colon-anchored fixed-pitch** layout for the whole row.
 3. **Angled shots** → **OpenCV.js** deskew/perspective-correct before decode.
 4. **Bulletproof** → an **ML model** (Blender-rendered + real, varied
    angles/lighting) — would also handle faint/degraded segments by context.
+
+Ongoing tuning: `?debug=1` overlays the auto-detected LCD/cells + decode string on
+each scan; the live-scan dials are the `SCAN_*` constants in `Screen.ts` (lock speed
+vs. robustness). Decode runs on the main thread (~6/s); if the preview stutters on
+slower phones, move it to a **Web Worker**.
 
 ### Why custom (build-vs-adapt, settled)
 No browser-ready seven-segment OCR tool exists to adapt: `ssocr` is C with no WASM
