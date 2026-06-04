@@ -1,6 +1,9 @@
 import { Camera, type CameraError } from '../camera/Camera'
 import { TimeSync } from '../time/TimeSync'
+import { SegmentDecoderRecognizer } from '../recognize/SegmentDecoderRecognizer'
 import { TesseractRecognizer } from '../recognize/TesseractRecognizer'
+import { CascadeRecognizer } from '../recognize/CascadeRecognizer'
+import { drawDecodeOverlay } from '../recognize/overlay'
 import { preprocess } from '../recognize/preprocess'
 import { TIME_CROP, cropToPixels, cropOverride, type NormCrop, type PixelRect } from '../recognize/geometry'
 import { computeDrift, type DriftResult } from '../drift/Drift'
@@ -14,7 +17,10 @@ export class Screen {
   private readonly root: HTMLElement
   private readonly camera = new Camera()
   private readonly time = new TimeSync()
-  private readonly recognizer = new TesseractRecognizer()
+  // Purpose-built F-91W decoder first; Tesseract as a lazy fallback. Keep the
+  // decoder instance to read its debug overlay in ?debug=1.
+  private readonly decoder = new SegmentDecoderRecognizer()
+  private readonly recognizer = new CascadeRecognizer([this.decoder, new TesseractRecognizer()])
   private readonly debug = isDebug()
 
   private state: State = 'idle'
@@ -161,6 +167,11 @@ export class Screen {
       const rec = await this.recognizer.recognize({ canvas: pre.canvas, is24h: this.is24h })
 
       if (this.debug) {
+        // Annotate the binarised crop with the decoder's LCD/band/cell boxes —
+        // the key view for dialling in framing on a real watch.
+        const dbg = this.decoder.lastDebug
+        const dctx = dbg && pre.canvas.getContext('2d')
+        if (dbg && dctx) drawDecodeOverlay(dctx, dbg)
         renderDebug(this.debugBox, {
           original: cropCanvas(cap.canvas, rect, 480),
           preprocessed: pre.canvas,

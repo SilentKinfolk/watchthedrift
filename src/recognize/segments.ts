@@ -1,13 +1,24 @@
 // Custom Casio F-91W seven-segment decoder — the primary recogniser (general
-// OCR proved unreliable on this rigid font). Pure: operates on a binarised RGBA
-// buffer (digit/bezel pixels black ≈ 0, LCD background white ≈ 255), so the
-// browser app and the Node harness share identical logic.
+// OCR proved unreliable on this rigid font). Pure: operates on a raw RGBA crop
+// (any framing of the watch face) and owns all binarisation, so the browser app
+// and the Node harness share identical logic.
 //
-// Pipeline: trim the black bezel → find the tall band of big HH:MM digits →
-// split it into digit cells + colon by column gaps → read each digit by sampling
-// its seven segment regions (on/off → digit). The smaller seconds sit as shorter
-// cells to the right. Lots of tunable constants here — refine against the
-// harness overlay (tools/out/*-decode.png).
+// Pipeline:
+//  0. Binarise with global Otsu — this keeps the dark case/bezel solidly black,
+//     which step 1 needs. (We tried OR-ing in an adaptive local threshold to
+//     recover faint segments, but the F-91W LCD's subtle background mottling
+//     reads as speckle under any window/C aggressive enough to help, so a single
+//     global threshold is both simpler and more reliable. Genuinely faint shots
+//     fall to the app's retake flow.)
+//  1. Isolate the bright LCD panel (the dark case AND the dark digits both
+//     binarise to black, so we anchor on the bright background, not a black frame).
+//  2. Find the tall band of big HH:MM digits.
+//  3. Split it into digit cells + colon by column gaps.
+//  4. Read each digit by sampling its seven segment regions (on/off → digit). The
+//     smaller seconds sit as shorter cells to the right.
+// Lots of tunable constants — refine against the harness overlay (tools/out/).
+
+import { toGray, histogram, otsuThreshold } from './binarize.ts'
 
 export interface SegmentReading {
   hh: number
@@ -27,13 +38,20 @@ export interface CellDebug extends Box {
   digit: number | null
   conf: number
   kind: 'big' | 'small' | 'colon'
+  /** Per-segment ink fractions [A,B,C,D,E,F,G], for tuning. */
+  frac?: number[]
 }
 
 export interface DecodeDebug {
+  /** Working region the decoder operated within (the LCD interior). */
   trim: Box
+  /** Raw detected LCD-panel bounding box, before inset. */
+  lcd: Box | null
   bigBand: Box | null
   cells: CellDebug[]
   note: string
+  /** Final ink mask (1 = ink), for the harness overlay. */
+  ink?: Uint8Array
 }
 
 export interface DecodeResult {
@@ -70,11 +88,16 @@ export function decodeSegments(
   width: number,
   height: number,
 ): DecodeResult {
-  const ink = new Uint8Array(width * height)
-  for (let p = 0, i = 0; p < ink.length; p++, i += 4) ink[p] = data[i] < 128 ? 1 : 0
+  const n = width * height
+  const gray = toGray(data, width, height)
+  const otsu = otsuThreshold(histogram(gray), n)
+
+  // Global-Otsu ink: dark digits AND dark bezel → 1. (See header on why we don't
+  // also run an adaptive pass.)
+  const ink = new Uint8Array(n)
+  for (let p = 0; p < n; p++) ink[p] = gray[p] <= otsu ? 1 : 0
   const at = (x: number, y: number): number => ink[y * width + x]
 
-  // 1. Trim the near-solid black bezel frame.
   const rowFrac = (y: number, x0: number, x1: number): number => {
     let s = 0
     for (let x = x0; x < x1; x++) s += at(x, y)
@@ -85,21 +108,33 @@ export function decodeSegments(
     for (let y = y0; y < y1; y++) s += at(x, y)
     return s / (y1 - y0)
   }
-  let ty0 = 0
-  let ty1 = height
-  while (ty0 < ty1 && rowFrac(ty0, 0, width) > 0.7) ty0++
-  while (ty1 > ty0 && rowFrac(ty1 - 1, 0, width) > 0.7) ty1--
+
+  // 1. Isolate the LCD panel = the largest connected region of bright pixels.
+  //    The dark case/bezel and the dark digits both binarise to black, so a
+  //    "trim the black frame" heuristic conflates them and locks onto the
+  //    surround. Anchoring on the bright LCD background instead excludes the
+  //    surround no matter how the watch is framed, so the crop can be generous.
+  const lcd = largestBrightBox(ink, width, height)
   let tx0 = 0
+  let ty0 = 0
   let tx1 = width
-  while (tx0 < tx1 && colFrac(tx0, ty0, ty1) > 0.7) tx0++
-  while (tx1 > tx0 && colFrac(tx1 - 1, ty0, ty1) > 0.7) tx1--
+  let ty1 = height
+  if (lcd) {
+    const ins = Math.max(1, Math.round(Math.min(lcd.w, lcd.h) * 0.03))
+    tx0 = lcd.x + ins
+    ty0 = lcd.y + ins
+    tx1 = lcd.x + lcd.w - ins
+    ty1 = lcd.y + lcd.h - ins
+  }
 
   const trim: Box = { x: tx0, y: ty0, w: tx1 - tx0, h: ty1 - ty0 }
-  const debug: DecodeDebug = { trim, bigBand: null, cells: [], note: '' }
+  const debug: DecodeDebug = { trim, lcd, bigBand: null, cells: [], note: '' }
   if (trim.w < 10 || trim.h < 10) {
-    debug.note = 'trim failed'
+    debug.note = lcd ? 'lcd too small' : 'no lcd'
     return { reading: null, debug }
   }
+
+  debug.ink = ink
 
   // 2. Tallest horizontal ink band = the big HH:MM digits.
   const rowMask: boolean[] = []
@@ -147,11 +182,11 @@ export function decodeSegments(
     // A "1" only inks its right side; widen the cell left to a full digit width.
     let cell: Box = g
     if (narrow && tall) cell = { x: Math.max(tx0, g.x - Math.round(digW - g.w)), y: g.y, w: Math.round(digW), h: g.h }
-    const { digit, conf } = sampleDigit(at, cell)
+    const { digit, conf, frac } = sampleDigit(at, cell)
     confSum += conf
     confN++
     const kind: 'big' | 'small' = tall ? 'big' : 'small'
-    debug.cells.push({ ...cell, digit, conf, kind })
+    debug.cells.push({ ...cell, digit, conf, kind, frac })
     if (digit != null) digits.push({ x: g.x, digit })
   }
 
@@ -184,6 +219,52 @@ export function decodeSegments(
   return { reading: { hh, mm, ss, confidence: confN ? confSum / confN : 0 }, debug }
 }
 
+/**
+ * Bounding box of the largest 4-connected region of bright (non-ink) pixels —
+ * the LCD panel. Both the dark case and the dark digits binarise to black, so
+ * the bright LCD background is the one reliable, framing-independent anchor: it
+ * is a single large blob that flows around the digits, while bright specks in
+ * the surround stay small. Iterative flood fill, O(width·height).
+ * Returns null if no bright region covers a meaningful share of the crop.
+ */
+function largestBrightBox(ink: Uint8Array, width: number, height: number): Box | null {
+  const n = width * height
+  const visited = new Uint8Array(n)
+  const stack = new Int32Array(n)
+  let best: Box | null = null
+  let bestArea = 0
+  for (let start = 0; start < n; start++) {
+    if (visited[start] || ink[start]) continue
+    let sp = 0
+    stack[sp++] = start
+    visited[start] = 1
+    let area = 0
+    let x0 = width
+    let y0 = height
+    let x1 = -1
+    let y1 = -1
+    while (sp > 0) {
+      const p = stack[--sp]
+      const x = p % width
+      const y = (p / width) | 0
+      area++
+      if (x < x0) x0 = x
+      if (x > x1) x1 = x
+      if (y < y0) y0 = y
+      if (y > y1) y1 = y
+      if (x > 0 && !visited[p - 1] && !ink[p - 1]) (visited[p - 1] = 1), (stack[sp++] = p - 1)
+      if (x + 1 < width && !visited[p + 1] && !ink[p + 1]) (visited[p + 1] = 1), (stack[sp++] = p + 1)
+      if (y > 0 && !visited[p - width] && !ink[p - width]) (visited[p - width] = 1), (stack[sp++] = p - width)
+      if (y + 1 < height && !visited[p + width] && !ink[p + width]) (visited[p + width] = 1), (stack[sp++] = p + width)
+    }
+    if (area > bestArea) {
+      bestArea = area
+      best = { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 }
+    }
+  }
+  return best && bestArea >= n * 0.05 ? best : null
+}
+
 /** Shrink a column run to the tight ink bounding box. */
 function tighten(
   at: (x: number, y: number) => number,
@@ -212,7 +293,7 @@ function tighten(
 function sampleDigit(
   at: (x: number, y: number) => number,
   cell: Box,
-): { digit: number | null; conf: number } {
+): { digit: number | null; conf: number; frac: number[] } {
   // Segment sample regions, normalised within the cell [x0,y0,x1,y1].
   const regions: Array<[number, number, number, number, number]> = [
     [A, 0.25, 0.0, 0.75, 0.2],
@@ -225,6 +306,7 @@ function sampleDigit(
   ]
   let pattern = 0
   let margin = 1
+  const frac: number[] = []
   for (const [seg, rx0, ry0, rx1, ry1] of regions) {
     const x0 = cell.x + Math.floor(rx0 * cell.w)
     const x1 = cell.x + Math.ceil(rx1 * cell.w)
@@ -238,9 +320,10 @@ function sampleDigit(
         n++
       }
     }
-    const frac = n ? s / n : 0
-    if (frac > SEG_ON) pattern |= seg
-    margin = Math.min(margin, Math.abs(frac - SEG_ON))
+    const f = n ? s / n : 0
+    frac.push(f)
+    if (f > SEG_ON) pattern |= seg
+    margin = Math.min(margin, Math.abs(f - SEG_ON))
   }
   let best: number | null = null
   let bestDiff = 99
@@ -252,7 +335,7 @@ function sampleDigit(
     }
   }
   const conf = (bestDiff === 0 ? 1 : bestDiff === 1 ? 0.5 : 0.1) * (0.5 + margin)
-  return { digit: bestDiff <= 1 ? best : null, conf }
+  return { digit: bestDiff <= 1 ? best : null, conf, frac }
 }
 
 function runs(mask: boolean[]): Array<{ start: number; end: number }> {

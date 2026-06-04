@@ -28,7 +28,7 @@ export function renderDebug(container: HTMLElement, info: DebugInfo): void {
     info.original.className = 'debug-canvas'
     container.appendChild(info.original)
   }
-  container.appendChild(caption('binarised (fed to OCR)'))
+  container.appendChild(caption('binarised + decoder boxes (LCD/band/cells)'))
   info.preprocessed.className = 'debug-canvas'
   container.appendChild(info.preprocessed)
 
