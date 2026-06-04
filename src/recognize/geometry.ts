@@ -21,8 +21,12 @@ export interface PixelRect {
   h: number
 }
 
-/** Centred band of the frame holding HH:MM:SS (normalised 0..1). Wide & short. */
-export const TIME_CROP: NormCrop = { cx: 0.5, cy: 0.52, w: 0.4, h: 0.16 }
+/** Centred band of the frame holding HH:MM:SS (normalised 0..1). Wide & short,
+ *  and deliberately SMALL: a phone can't focus closer than ~10 cm, so the watch
+ *  must sit a hand's width away — at which point the time row only fills a small
+ *  fraction of the (4K) frame. A big box forces you in past the focus limit and
+ *  the digits blur. Fine-tune live in ?debug=1 with the W/H controls. */
+export const TIME_CROP: NormCrop = { cx: 0.5, cy: 0.52, w: 0.24, h: 0.1 }
 
 export function cropToPixels(c: NormCrop, frameW: number, frameH: number): PixelRect {
   const w = Math.round(c.w * frameW)
