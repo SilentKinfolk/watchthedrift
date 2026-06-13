@@ -32,6 +32,8 @@ export class Screen {
   private is24h = true
   private lastDrift: DriftResult | null = null
   private crop: NormCrop = cropOverride() ?? TIME_CROP
+  // Live reference-clock tick (self-correcting onto the true-second boundary).
+  private clockTimer: ReturnType<typeof setTimeout> | null = null
 
   // Live-scan loop state.
   private scanning = false
@@ -44,6 +46,8 @@ export class Screen {
   private video!: HTMLVideoElement
   private viewfinder!: HTMLElement
   private guide!: HTMLElement
+  private clockBox!: HTMLElement
+  private clockTime!: HTMLElement
   private answer!: HTMLElement
   private sub!: HTMLElement
   private cond!: HTMLElement
@@ -56,13 +60,20 @@ export class Screen {
     // Sync the clock in the background while the user gets the camera going.
     this.time
       .sync()
-      .then(() => this.refreshCond())
+      .then(() => {
+        this.refreshCond()
+        this.renderClock() // snap the reference clock onto true time at once
+      })
       .catch(() => {})
   }
 
   private build(): void {
     this.root.innerHTML = `
       <h1 class="question">How many seconds is your watch off?</h1>
+      <div class="clock" hidden>
+        <div class="clock-time">--:--:--</div>
+        <div class="clock-label">true time now — compare with your watch</div>
+      </div>
       <div class="viewfinder" hidden>
         <video playsinline muted></video>
         <div class="guide"></div>
@@ -76,6 +87,8 @@ export class Screen {
     this.viewfinder = this.q('.viewfinder')
     this.video = this.q('video')
     this.guide = this.q('.guide')
+    this.clockBox = this.q('.clock')
+    this.clockTime = this.q('.clock-time')
     this.answer = this.q('.answer')
     this.sub = this.q('.sub')
     this.cond = this.q('.cond')
@@ -83,6 +96,7 @@ export class Screen {
     this.debugBox = this.q('.debug')
     this.applyGuide()
     this.setState('idle')
+    this.startClock()
   }
 
   private q<T extends HTMLElement>(sel: string): T {
@@ -104,6 +118,9 @@ export class Screen {
     if (state !== 'scanning') this.stopScan()
     this.state = state
     this.viewfinder.hidden = !(state === 'preview' || state === 'scanning')
+    // Reference clock is useful from idle through result; only hidden while the
+    // camera is spinning up or on an error screen.
+    this.clockBox.hidden = state === 'starting' || state === 'error'
     this.answer.hidden = state !== 'result'
     this.controls.innerHTML = ''
 
@@ -298,6 +315,7 @@ export class Screen {
         wrap.querySelectorAll('button').forEach((btn) => {
           btn.setAttribute('aria-pressed', String((btn.textContent === '24h') === this.is24h))
         })
+        this.renderClock() // match the watch's mode so the comparison lines up
       })
       return b
     }
@@ -350,6 +368,30 @@ export class Screen {
     this.cond.textContent = this.timeStatusText()
   }
 
+  /** Best estimate of true UTC right now, epoch ms: the synced reference once we
+   *  have it, otherwise the bare device clock until the first sync lands. */
+  private trueNowMs(): number {
+    return this.time.current ? this.time.trueUtcAt(performance.now()).epochMs : Date.now()
+  }
+
+  private renderClock(): void {
+    this.clockTime.textContent = formatClock(new Date(this.trueNowMs()), this.is24h)
+  }
+
+  /** Tick the reference clock in step with real time. After each render we wait
+   *  out the rest of the current true second (plus a hair) so the displayed
+   *  seconds flip on the real boundary — what matters when eyeballing the watch
+   *  against it. setInterval(…, 1000) would slowly drift off the boundary. */
+  private startClock(): void {
+    const tick = (): void => {
+      this.renderClock()
+      const delay = 1000 - (this.trueNowMs() % 1000) + 15
+      this.clockTimer = setTimeout(tick, delay)
+    }
+    if (this.clockTimer != null) clearTimeout(this.clockTimer)
+    tick()
+  }
+
   private timeStatusText(): string {
     const o = this.time.current
     if (!o) return 'checking the time…'
@@ -368,6 +410,16 @@ export class Screen {
 
 function clamp(n: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, n))
+}
+
+/** HH:MM:SS in the watch's own mode, so the on-screen reference reads like the
+ *  face. 12h drops the leading zero and tags am/pm to disambiguate. */
+function formatClock(d: Date, is24h: boolean): string {
+  const mm = String(d.getMinutes()).padStart(2, '0')
+  const ss = String(d.getSeconds()).padStart(2, '0')
+  if (is24h) return `${String(d.getHours()).padStart(2, '0')}:${mm}:${ss}`
+  const h = d.getHours() % 12 || 12
+  return `${h}:${mm}:${ss} ${d.getHours() < 12 ? 'am' : 'pm'}`
 }
 
 function formatBig(d: DriftResult): string {

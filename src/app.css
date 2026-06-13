@@ -64,6 +64,26 @@ body {
   font-style: italic;
 }
 
+/* Live reference clock — the true (synced) time, shown so you can check your
+   watch against it by eye before scanning. Tabular figures so the seconds don't
+   jiggle the width as they tick. */
+.clock {
+  margin: 0 0 18px;
+}
+
+.clock-time {
+  font-size: clamp(1.7rem, 5.5vw, 2.6rem);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  line-height: 1.1;
+}
+
+.clock-label {
+  margin-top: 2px;
+  font-size: 0.8rem;
+  color: #555;
+}
+
 /* Buttons rendered as plain underlined text links */
 .textlink {
   background: none;
