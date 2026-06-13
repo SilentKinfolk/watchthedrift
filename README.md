@@ -12,8 +12,8 @@ A quartz watch like the F-91W slowly drifts out of sync with real time. It's spe
 
 ## How it works
 
-1. **Camera** — live rear-camera preview. Just point it at your watch; there's no box to line up.
-2. **Read** — a purpose-built F-91W seven-segment decoder finds the LCD in the frame and reads it on-device. It scans frames continuously and locks the instant two consecutive reads agree (so a stray misread is discarded), timestamping the exact moment of the winning frame.
+1. **Camera** — live rear-camera preview with a small alignment box. Line the time row (HH:MM:SS) up inside it, a hand's width away so it stays in focus.
+2. **Read** — a purpose-built F-91W seven-segment decoder reads the LCD inside the box on-device (cropping tight to the row keeps the binarisation clean, instead of a bright background throwing it off). It scans frames continuously and locks the instant two consecutive reads agree (so a stray misread is discarded), timestamping the exact moment of the winning frame.
 3. **Reference time** — an NTP-style time check over HTTPS with round-trip compensation pins "true" time to a few tens of milliseconds.
 4. **Drift** — the displayed time minus true time, shown with an honest uncertainty band.
 

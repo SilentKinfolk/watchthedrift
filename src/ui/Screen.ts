@@ -23,8 +23,10 @@ export class Screen {
   private readonly root: HTMLElement
   private readonly camera = new Camera()
   private readonly time = new TimeSync()
-  // The F-91W segment decoder auto-detects the LCD in the whole frame, so we feed
-  // it the full capture (no precise crop) and let it find the watch.
+  // The F-91W segment decoder reads the alignment box: we crop to TIME_CROP (the
+  // on-screen box) and it locates + locally re-thresholds the LCD within that
+  // crop. Cropping tight keeps binarisation clean — feeding the whole frame let a
+  // bright background skew the threshold and read an off-angle face as all-black.
   private readonly recognizer = new SegmentDecoderRecognizer()
   private readonly debug = isDebug()
 
@@ -133,12 +135,12 @@ export class Screen {
         this.setSub('Starting the camera…')
         break
       case 'preview':
-        this.setSub('Point at your watch and tap Scan — it finds the time on its own, no lining up.')
+        this.setSub('Fit the time row (HH:MM:SS) inside the box, hold steady, then tap Scan.')
         this.controls.append(this.btn('Scan', () => void this.startScan()), this.modeToggle())
         if (this.debug) this.controls.append(this.sizeControls())
         break
       case 'scanning':
-        this.setSub('Scanning… hold the camera over your watch.')
+        this.setSub('Scanning… keep the time row inside the box and hold steady.')
         this.controls.append(this.btn('Stop', () => this.setState('preview')))
         break
       case 'result': {
@@ -226,7 +228,7 @@ export class Screen {
 
     if (!rec.ok) {
       if (performance.now() - this.scanStartedAt > SCAN_HINT_AFTER_MS && this.samples.length === 0) {
-        this.setSub('Still looking — make sure the time is well-lit and fills a good part of the view.')
+        this.setSub('Still looking — line the time row up inside the box, in good light, and hold steady.')
       }
       return
     }

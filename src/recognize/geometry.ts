@@ -21,12 +21,15 @@ export interface PixelRect {
   h: number
 }
 
-/** The region of the frame fed to the decoder (normalised 0..1). Now large and
- *  forgiving: the decoder auto-detects the LCD inside it, so there's no box to
- *  line up — just point at the watch. We keep a small inset from the very edges
- *  to drop vignette/clutter. Shrink it in ?debug=1 (W/H) only if a bright
- *  background nearby distracts detection. */
-export const TIME_CROP: NormCrop = { cx: 0.5, cy: 0.5, w: 0.94, h: 0.94 }
+/** Centred alignment box holding HH:MM:SS (normalised 0..1). Wide & short, and
+ *  deliberately SMALL: a phone can't focus closer than ~10 cm, so the watch sits
+ *  a hand's width away, where the time row fills only a small part of the frame.
+ *  Line the time row up inside this box — the decoder reads what's in it (and
+ *  locally re-thresholds the LCD it finds there). Cropping tight to the row keeps
+ *  the binarisation LCD-dominated; feeding the whole scene instead let a bright
+ *  background skew the threshold and read an off-angle face as all-black. Fine-
+ *  tune live in ?debug=1 with the W/H controls. */
+export const TIME_CROP: NormCrop = { cx: 0.5, cy: 0.52, w: 0.24, h: 0.1 }
 
 export function cropToPixels(c: NormCrop, frameW: number, frameH: number): PixelRect {
   const w = Math.round(c.w * frameW)

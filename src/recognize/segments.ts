@@ -105,10 +105,10 @@ export function decodeSegments(
   const n = width * height
   const gray = toGray(data, width, height)
 
-  // Detection pass: a global-Otsu mask over the whole frame (dark digits AND dark
-  // case/bezel → 1) just to LOCATE bright LCD candidates. Reading happens later,
-  // per candidate, on its own local threshold — so the dark watch body never
-  // muddies the digits' b&w.
+  // Detection pass: a global-Otsu mask over the input (the app's boxed crop, or a
+  // full frame in the harness) — dark digits AND dark case/bezel → 1 — just to
+  // LOCATE bright LCD candidates. Reading happens later, per candidate, on its own
+  // local threshold — so the dark watch body never muddies the digits' b&w.
   const globalOtsu = otsuThreshold(histogram(gray), n)
   const ink = new Uint8Array(n)
   for (let p = 0; p < n; p++) ink[p] = gray[p] <= globalOtsu ? 1 : 0
@@ -116,7 +116,9 @@ export function decodeSegments(
   const debug: DecodeDebug = { lcd: null, crop: null, bigBand: null, cells: [], note: '' }
 
   // 1. Candidate LCD panels = the largest bright connected regions (biggest
-  //    first). No tight crop required — we search the whole frame.
+  //    first). We search the whole input: the app hands us a tight box around the
+  //    time row, but the decoder still locates the LCD within it (and tolerates a
+  //    looser crop, as in the harness).
   const candidates = brightBoxes(ink, width, height)
   if (candidates.length === 0) {
     debug.note = 'no bright regions'
