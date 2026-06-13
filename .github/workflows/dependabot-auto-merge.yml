@@ -38,9 +38,12 @@ jobs:
       - name: Find the Dependabot PR for this CI run
         id: pr
         run: |
+          # The job-level `if` already guarantees this CI run was for a Dependabot
+          # PR; its head branch is unique to that one PR, so just take the open PR
+          # on it. (Don't filter on author.login — gh reports it as "app/dependabot",
+          # not "dependabot[bot]", which silently matched nothing the first time.)
           number=$(gh pr list --repo "$REPO" --head "$BRANCH" --state open \
-            --json number,author \
-            --jq '[.[] | select(.author.login == "dependabot[bot]")][0].number // ""')
+            --json number --jq '.[0].number // ""')
           echo "number=$number" >> "$GITHUB_OUTPUT"
           echo "Resolved PR #${number:-<none>} for branch '$BRANCH'"
 
