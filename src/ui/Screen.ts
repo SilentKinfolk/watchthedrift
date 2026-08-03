@@ -1,5 +1,6 @@
 import { Camera, type CameraError } from '../camera/Camera'
 import { TimeSync } from '../time/TimeSync'
+import { SOURCE_LABELS } from '../time/sources'
 import { SegmentDecoderRecognizer } from '../recognize/SegmentDecoderRecognizer'
 import { drawDecodeOverlay } from '../recognize/overlay'
 import { preprocess } from '../recognize/preprocess'
@@ -16,6 +17,10 @@ const SCAN_AGREE_S = 1.0 // …and their drift must match within this many secon
 const SCAN_SAMPLE_WINDOW_MS = 4000 // forget reads older than this when corroborating
 const SCAN_HINT_AFTER_MS = 7000 // nudge the user if nothing has read by now
 const DEBUG_RENDER_GAP_MS = 350 // throttle the ?debug overlay while scanning
+// How often to consider re-checking the clock. TimeSync.refreshIfStale() no-ops
+// until the offset has aged past MAX_AGE_MS, so this tick is cheap; it exists so
+// a page left open for hours never measures against a reference from hours ago.
+const TIME_RECHECK_GAP_MS = 60_000
 
 // The whole single-screen app. Holds a stable DOM skeleton (so the live <video>
 // survives state changes) and swaps text / buttons / visibility per state.
@@ -33,6 +38,8 @@ export class Screen {
   private state: State = 'idle'
   private is24h = true
   private lastDrift: DriftResult | null = null
+  /** Whether the reference behind `lastDrift` was quorum-verified at capture. */
+  private lastVerified = true
   private crop: NormCrop = cropOverride() ?? TIME_CROP
   // Live reference-clock tick (self-correcting onto the true-second boundary).
   private clockTimer: ReturnType<typeof setTimeout> | null = null
@@ -45,11 +52,15 @@ export class Screen {
   /** Recent valid reads (drift + capture time) for the agree-twice cross-check. */
   private samples: Array<{ offsetSec: number; at: number }> = []
 
+  // Periodic staleness check for the time reference.
+  private recheckTimer: ReturnType<typeof setInterval> | null = null
+
   private video!: HTMLVideoElement
   private viewfinder!: HTMLElement
   private guide!: HTMLElement
   private clockBox!: HTMLElement
   private clockTime!: HTMLElement
+  private clockLabel!: HTMLElement
   private answer!: HTMLElement
   private sub!: HTMLElement
   private cond!: HTMLElement
@@ -67,6 +78,39 @@ export class Screen {
         this.renderClock() // snap the reference clock onto true time at once
       })
       .catch(() => {})
+    this.watchTimeFreshness()
+  }
+
+  /** Keep the reference honest over a long-lived page. The offset is re-checked
+   *  once it ages out — on a timer, and immediately when the tab comes back,
+   *  because a backgrounded tab has its timers throttled and a phone may have
+   *  been asleep for hours. Without this the site would keep quoting an offset
+   *  measured when the page was opened. */
+  private watchTimeFreshness(): void {
+    this.recheckTimer = setInterval(() => void this.refreshTime(), TIME_RECHECK_GAP_MS)
+    document.addEventListener('visibilitychange', this.onVisibilityChange)
+  }
+
+  private readonly onVisibilityChange = (): void => {
+    if (document.visibilityState === 'visible') void this.refreshTime()
+  }
+
+  /** A re-sync landing mid-scan is safe: each frame is converted to true UTC at
+   *  the instant it is grabbed, so a correction larger than SCAN_AGREE_S simply
+   *  stops the pending reads corroborating and the scan carries on. */
+  private async refreshTime(): Promise<void> {
+    await this.time.refreshIfStale()
+    this.refreshCond()
+    this.renderClock()
+  }
+
+  /** Release timers and listeners (the app is single-screen, so this is only for
+   *  tests and hot-reload). */
+  destroy(): void {
+    this.stopScan()
+    if (this.clockTimer != null) clearTimeout(this.clockTimer)
+    if (this.recheckTimer != null) clearInterval(this.recheckTimer)
+    document.removeEventListener('visibilitychange', this.onVisibilityChange)
   }
 
   private build(): void {
@@ -91,6 +135,7 @@ export class Screen {
     this.guide = this.q('.guide')
     this.clockBox = this.q('.clock')
     this.clockTime = this.q('.clock-time')
+    this.clockLabel = this.q('.clock-label')
     this.answer = this.q('.answer')
     this.sub = this.q('.sub')
     this.cond = this.q('.cond')
@@ -146,7 +191,12 @@ export class Screen {
       case 'result': {
         const d = this.lastDrift!
         this.answer.textContent = formatBig(d)
-        this.setSub(formatSub(d))
+        this.answer.classList.toggle('unverified', !this.lastVerified)
+        this.setSub(
+          this.lastVerified
+            ? formatSub(d)
+            : `${formatSub(d)} The time reference behind this couldn’t be verified, so treat it as rough.`,
+        )
         this.controls.append(this.btn('Scan again', () => void this.startScan()))
         break
       }
@@ -171,8 +221,15 @@ export class Screen {
   /** Begin continuously decoding frames until two reads agree (point-and-catch). */
   private async startScan(): Promise<void> {
     if (this.state === 'scanning') return
-    // Make sure the clock sync is in flight; processFrame waits for it to land.
-    if (!this.time.current) this.time.sync().then(() => this.refreshCond()).catch(() => {})
+    // A measurement is only as good as the reference behind it, so re-check the
+    // clock before the scan rather than after. Bounded: if the network is dead we
+    // want to say so within a few seconds, not leave the user holding the camera up.
+    if (this.time.isStale()) {
+      this.setSub('Checking the time…')
+      await this.time.refreshIfStale(undefined, { samples: 2, timeoutMs: 2000 })
+      this.refreshCond()
+      this.renderClock()
+    }
     await this.recognizer.init() // instant for the segment decoder
     this.samples = []
     this.scanning = true
@@ -252,6 +309,7 @@ export class Screen {
 
     if (corroborated) {
       this.lastDrift = drift
+      this.lastVerified = this.time.verified
       this.setState('result')
     } else {
       this.setSub('Got the time — hold steady…')
@@ -376,8 +434,15 @@ export class Screen {
     return this.time.current ? this.time.trueUtcAt(performance.now()).epochMs : Date.now()
   }
 
+  /** Render the reference clock, and never let it pass off an unverified reading
+   *  as true time — the whole point of the display is that it can be trusted. */
   private renderClock(): void {
     this.clockTime.textContent = formatClock(new Date(this.trueNowMs()), this.is24h)
+    const verified = this.time.verified
+    this.clockBox.classList.toggle('unverified', !verified)
+    this.clockLabel.textContent = verified
+      ? 'true time now — compare with your watch'
+      : 'this device’s clock — unverified, see below'
   }
 
   /** Tick the reference clock in step with real time. After each render we wait
@@ -394,20 +459,32 @@ export class Screen {
     tick()
   }
 
+  /** Say what the reference actually rests on. A single server's word is not
+   *  evidence that its clock is right, so we report how many independent sources
+   *  agreed and how closely — and say plainly when nothing could be verified. */
   private timeStatusText(): string {
     const o = this.time.current
     if (!o) return 'checking the time…'
     if (o.degraded) {
-      return '⚠ couldn’t reach a time server — using this device’s clock, so treat the result as rough.'
+      return o.reason === 'no-quorum'
+        ? '⚠ the time servers disagreed with each other, so none of them could be trusted — using this device’s clock. Treat the result as rough.'
+        : '⚠ couldn’t reach a time server — using this device’s clock, so treat the result as rough.'
     }
-    const names: Record<string, string> = {
-      timeapi: 'timeapi.io',
-      cloudflare: 'Cloudflare',
-      'date-header': 'the server clock',
-      device: 'this device',
-    }
-    return `time checked against ${names[o.source] ?? o.source}`
+    const names = o.sources.map((s) => SOURCE_LABELS[s] ?? s)
+    const agreement = `agreeing to within ${formatSpread(o.spreadMs)}`
+    const head = `time checked against ${joinList(names)} — ${agreement}`
+    return this.time.staleCheck ? `${head}. ⚠ the latest re-check didn’t confirm it.` : head
   }
+}
+
+/** "A", "A and B", "A, B and C" — the app speaks plain English to the user. */
+function joinList(items: string[]): string {
+  if (items.length <= 1) return items[0] ?? ''
+  return `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`
+}
+
+function formatSpread(ms: number): string {
+  return ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`
 }
 
 function clamp(n: number, lo: number, hi: number): number {

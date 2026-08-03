@@ -84,6 +84,16 @@ body {
   color: #555;
 }
 
+/* An unverified reading must never look like a verified one. The black-and-white
+   palette carries this by greying the figure back and dashing its underline,
+   rather than by colour, which a monochrome UI has no room for. */
+.clock.unverified .clock-time,
+.answer.unverified {
+  color: #777;
+  text-decoration: underline dashed #999;
+  text-underline-offset: 6px;
+}
+
 /* Buttons rendered as plain underlined text links */
 .textlink {
   background: none;
