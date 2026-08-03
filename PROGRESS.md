@@ -162,7 +162,7 @@ Deploy: push to `main` → GitHub Actions builds and publishes to Pages.
     time row; the decoder reads + locally re-thresholds the LCD it finds within it.
   - `parse.ts` — OCR-text → HH:MM:SS (Tesseract-path helper; idle while unwired).
 - `tools/ocr-harness.ts` — headless harness; reads `tools/fixtures/` + `tools/local/` (both gitignored images), decodes, scores vs filename labels, writes annotated overlays to `tools/out/`.
-- `.github/workflows/deploy.yml` — Pages deploy.
+- `.github/workflows/deploy.yml` — Pages deploy, gated on a `test` job that must pass before `build` runs. The gate lives inside this workflow because `ci.yml` is triggered separately by the same push and so cannot block it.
 
 ## The recognition engine (what + how)
 **It is a hand-written, pure-TypeScript algorithm — no ML, no cloud, no API.** It
