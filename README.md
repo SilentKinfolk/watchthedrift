@@ -14,8 +14,14 @@ A quartz watch like the F-91W slowly drifts out of sync with real time. It's spe
 
 1. **Camera** — live rear-camera preview with a small alignment box. Line the time row (HH:MM:SS) up inside it, a hand's width away so it stays in focus.
 2. **Read** — a purpose-built F-91W seven-segment decoder reads the LCD inside the box on-device (cropping tight to the row keeps the binarisation clean, instead of a bright background throwing it off). It scans frames continuously and locks the instant two consecutive reads agree (so a stray misread is discarded), timestamping the exact moment of the winning frame.
-3. **Reference time** — an NTP-style time check over HTTPS with round-trip compensation pins "true" time to a few tens of milliseconds.
+3. **Reference time** — an NTP-style time check over HTTPS with round-trip compensation pins "true" time to a few tens of milliseconds. Four independent sources are queried in parallel and an instant is trusted only where at least two of them agree, so a single server with a wrong clock is outvoted rather than believed. The status line names the sources it used and how closely they agreed.
 4. **Drift** — the displayed time minus true time, shown with an honest uncertainty band.
+
+### Why the reference is cross-checked
+
+On 3 August 2026 `timeapi.io` — then the sole source — served well-formed JSON at a healthy round-trip from a host whose clock was set **18 min 21 s slow**, and the app reported that as true time with a ±86 ms confidence band. Nothing a client can see distinguishes a confidently wrong clock from a right one: the HTTP status, the response shape and the round-trip time were all normal, and uptime monitors listed the service as up.
+
+Round-trip time measures network latency and says nothing about whether a server's clock is correct, so a single source's word is not evidence. The app now believes an instant only where independent sources corroborate it, widens its stated uncertainty to cover their disagreement, and falls back to the device clock — clearly marked as unverified — when they cannot agree. The reference is also re-checked once it ages past five minutes, when the tab is brought back to the foreground, and before every scan, so a page left open does not measure against a stale offset.
 
 ### A note on precision
 
@@ -23,7 +29,7 @@ The watch shows whole seconds, so the answer is to the nearest second — which 
 
 ### Privacy
 
-All image processing happens **on your device**. The only network request is the time check. No photos are uploaded, and nothing is stored or logged — every measurement is ephemeral.
+All image processing happens **on your device**. The only network requests are the time checks. No photos are uploaded, and nothing is stored or logged — every measurement is ephemeral.
 
 ## Development
 
@@ -44,7 +50,7 @@ Pushing to `main` builds the site and deploys it to GitHub Pages via the workflo
 
 Built iteratively.
 
-- **Working & live:** point-and-catch live scan → custom on-device F-91W segment decoder → NTP-style time check → drift, deployed to GitHub Pages.
+- **Working & live:** point-and-catch live scan → custom on-device F-91W segment decoder → corroborated NTP-style time check → drift, deployed to GitHub Pages.
 - **In progress:** reliability in dim light — the reflective LCD has no backlight, so it's hard to spot when it isn't bright; plus angled/perspective shots.
 - **Later:** installable PWA / offline use; support for other digital-watch models.
 

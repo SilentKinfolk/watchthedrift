@@ -16,7 +16,7 @@ later as a PWA.
 | UI / single-screen state machine (B&W) | ✅ done |
 | Capture flow | ✅ **live scan** (point-and-catch; locks when two reads agree) |
 | Camera capture (rear cam, 1080p, timestamped) | ✅ done |
-| NTP-style time sync (timeapi.io + fallbacks, RTT-compensated) | ✅ done, unit-tested |
+| NTP-style time sync (4 sources in parallel, corroborated, RTT-compensated) | ✅ done, unit-tested — see [The falseticker](#the-falseticker-2026-08-03) |
 | Drift maths (nearest-mod-period, 12h/24h, wrap) | ✅ done, unit-tested |
 | Recognition (reading the digits) | 🟡 **reads the time row framed in a box; clean shots, live on-device** — see below |
 | PWA install/offline | ⏸ on hold (deliberately) |
@@ -59,6 +59,52 @@ only add a wasm-load delay before an inevitable retake. `TesseractRecognizer` +
 Tesseract on the decoder's **detected LCD crop** (`debug.lcd`). Dropping it from
 the bundle also cut it from ~38 kB to ~19 kB.
 
+## The falseticker (2026-08-03)
+
+The live site spent an unknown period reporting a reference clock **1101 s
+(18 min 21 s) slow**, which would have told anyone scanning a correctly-set watch
+that it ran roughly `+1101 s` fast. The cause was upstream and the blindness was
+ours, and the second half is the part worth keeping notes on.
+
+`timeapi.io` was first in a first-success chain, and its host clock was set 1101 s
+behind while everything observable about it looked healthy: HTTP 200, well-formed
+JSON, ~170 ms round-trip, milliseconds advancing at the correct rate (14 ms of
+rate error measured over 13 s). Its own `nginx/1.29.4` `Date:` header carried the
+same 1101 s error, so the operating system clock on that host was wrong rather
+than the application's date handling. Cloudflare, Binance and GitHub's own servers
+all agreed with each other to within ~50 ms throughout. No public incident report
+existed, and uptime monitors listed the service as up — which they would, since an
+HTTP 200 from a wrong clock passes every availability check ever written.
+
+Two design faults let it through, both now fixed:
+
+1. **The chain only advanced on failure.** A source that answers confidently and
+   wrongly wins permanently, and the Cloudflare and `Date`-header fallbacks behind
+   it were never reached. `sync()` now samples all four sources **in parallel** and
+   believes an instant only where the confidence bands of at least two of them
+   overlap (`corroborate()` in `TimeSync.ts`). A falseticker minutes out intersects
+   nothing and is discarded; an unresolvable split degrades to the device clock and
+   says so on screen. Two equally-supported sets are also refused rather than
+   broken by list order, since picking one there would be a guess dressed as a
+   measurement.
+2. **The ± band measured the wrong thing.** It was `rtt/2 + floor`, which describes
+   network latency and says nothing about whether the server's clock is right — so
+   the app reported ±86 ms while being 18 minutes out. The band now widens to cover
+   the spread between corroborating sources, and the status line names the sources
+   and quotes their agreement, so the figure is checkable rather than asserted.
+
+Staleness was the related hole: the offset was measured once at page load and
+never re-checked, so a page left open overnight measured against an offset from
+the night before. `TimeSync` now stamps each offset, treats one older than
+`MAX_AGE_MS` (5 min) as stale, and re-checks on a timer, when the tab becomes
+visible again (mobile suspend), and before a scan starts.
+
+`timeapi.io` was kept in the pool rather than deleted. Under corroboration a wrong
+source is outvoted instead of believed, and it rejoins the quorum by itself if the
+host is ever repaired. Browser-reachable sources are scarce: `Date` is not a
+CORS-safelisted response header, so cross-origin `Date` is unreadable and only
+same-origin works, and `worldtimeapi.org` was dead when tested.
+
 ## How to run
 ```sh
 npm install
@@ -72,7 +118,7 @@ Deploy: push to `main` → GitHub Actions builds and publishes to Pages.
 ## Key files
 - `src/ui/Screen.ts` — the single-screen state machine (idle/preview/measuring/result/retake/errors), `?debug=1` view, live `W/H` box controls.
 - `src/camera/Camera.ts` — getUserMedia rear camera + frame capture/timestamp.
-- `src/time/TimeSync.ts`, `src/time/sources.ts` — RTT-compensated offset; timeapi.io → Cloudflare → Date-header → device-clock chain.
+- `src/time/TimeSync.ts`, `src/time/sources.ts` — RTT-compensated offset; four sources sampled in parallel (Cloudflare, same-origin `Date`, Binance, timeapi.io) and believed only where two bands agree. Falls back to the device clock, marked, when they don't.
 - `src/drift/Drift.ts` (+ `.test.ts`) — signed offset, nearest difference mod 12h/24h.
 - `src/recognize/`
   - `Recognizer.ts` — engine interface (swappable).
