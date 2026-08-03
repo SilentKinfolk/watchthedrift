@@ -88,11 +88,16 @@ export class Screen {
    *  measured when the page was opened. */
   private watchTimeFreshness(): void {
     this.recheckTimer = setInterval(() => void this.refreshTime(), TIME_RECHECK_GAP_MS)
-    document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible') void this.refreshTime()
-    })
+    document.addEventListener('visibilitychange', this.onVisibilityChange)
   }
 
+  private readonly onVisibilityChange = (): void => {
+    if (document.visibilityState === 'visible') void this.refreshTime()
+  }
+
+  /** A re-sync landing mid-scan is safe: each frame is converted to true UTC at
+   *  the instant it is grabbed, so a correction larger than SCAN_AGREE_S simply
+   *  stops the pending reads corroborating and the scan carries on. */
   private async refreshTime(): Promise<void> {
     await this.time.refreshIfStale()
     this.refreshCond()
@@ -105,6 +110,7 @@ export class Screen {
     this.stopScan()
     if (this.clockTimer != null) clearTimeout(this.clockTimer)
     if (this.recheckTimer != null) clearInterval(this.recheckTimer)
+    document.removeEventListener('visibilitychange', this.onVisibilityChange)
   }
 
   private build(): void {
