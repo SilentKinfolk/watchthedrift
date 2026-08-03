@@ -11,10 +11,10 @@ describe('offsetFromSamples', () => {
       // RTT 40 (smaller), skew +50 → this one should win
       { serverMs: ORIGIN + 120 + 50, floorMs: 1, t0: 100, t1: 140 },
     ]
-    const off = offsetFromSamples(samples, ORIGIN, 'timeapi')
+    const off = offsetFromSamples(samples, ORIGIN, 'cloudflare')
     expect(off.skewMs).toBeCloseTo(50, 6)
     expect(off.uncertaintyMs).toBeCloseTo(40 / 2 + 1, 6) // rtt/2 + floor
-    expect(off.id).toBe('timeapi')
+    expect(off.id).toBe('cloudflare')
   })
 
   it('adds the source floor to the uncertainty band', () => {
@@ -25,10 +25,14 @@ describe('offsetFromSamples', () => {
   })
 
   it('throws when given no samples', () => {
-    expect(() => offsetFromSamples([], ORIGIN, 'timeapi')).toThrow()
+    expect(() => offsetFromSamples([], ORIGIN, 'cloudflare')).toThrow()
   })
 })
 
+// The source ids below are arbitrary labels needed to build a Candidate; they
+// carry no claim about the named services. What is under test is the geometry.
+// Where a case uses a skew of −1_100_744 ms, that is the figure measured from
+// timeapi.io on 2026-08-03, the falseticker this logic exists to reject.
 describe('corroborate', () => {
   const c = (id: Candidate['id'], skewMs: number, uncertaintyMs: number): Candidate => ({
     id,
@@ -37,17 +41,15 @@ describe('corroborate', () => {
   })
 
   it('rejects a falseticker that the rest of the pool contradicts', () => {
-    // The 2026-08-03 failure: timeapi.io answered normally from a clock 1100.7 s
-    // slow. Three honest sources agree within tens of ms and outvote it.
     const agreed = corroborate([
-      c('timeapi', -1_100_744, 30),
+      c('device', -1_100_744, 30),
       c('cloudflare', 12, 40),
-      c('binance', -5, 60),
+      c('wikipedia', -5, 60),
       c('pages-date', 60, 520),
     ])
     expect(agreed).not.toBeNull()
-    expect(agreed!.sources).not.toContain('timeapi')
-    expect(agreed!.sources).toEqual(expect.arrayContaining(['cloudflare', 'binance', 'pages-date']))
+    expect(agreed!.sources).not.toContain('device')
+    expect(agreed!.sources).toEqual(expect.arrayContaining(['cloudflare', 'wikipedia', 'pages-date']))
     // Point estimate comes from the tightest band, here Cloudflare's ±40 ms.
     expect(agreed!.primary).toBe('cloudflare')
     expect(agreed!.skewMs).toBeCloseTo(12, 6)
@@ -55,7 +57,7 @@ describe('corroborate', () => {
 
   it('refuses to pick a winner when sources split', () => {
     // Two sources, minutes apart: nothing can say which one is right.
-    expect(corroborate([c('cloudflare', 0, 50), c('timeapi', -1_100_744, 50)])).toBeNull()
+    expect(corroborate([c('cloudflare', 0, 50), c('device', -1_100_744, 50)])).toBeNull()
   })
 
   it('refuses a single source, however tight its band', () => {
@@ -90,17 +92,17 @@ describe('corroborate', () => {
   it('prefers the larger agreeing set over a smaller one', () => {
     // Three sources agreeing must outvote a mutually-consistent pair a minute out.
     const agreed = corroborate([
-      c('timeapi', 60_000, 40),
-      c('device', 60_030, 40),
+      c('device', 60_000, 40),
+      c('google', 60_030, 40),
       c('cloudflare', 0, 40),
-      c('binance', 5, 60),
+      c('wikipedia', 5, 60),
       c('pages-date', 20, 520),
     ])
     expect(agreed).not.toBeNull()
     expect(agreed!.sources).toEqual(
-      expect.arrayContaining(['cloudflare', 'binance', 'pages-date']),
+      expect.arrayContaining(['cloudflare', 'wikipedia', 'pages-date']),
     )
-    expect(agreed!.sources).not.toContain('timeapi')
+    expect(agreed!.sources).not.toContain('device')
     expect(agreed!.skewMs).toBeCloseTo(0, 6)
   })
 
@@ -110,8 +112,8 @@ describe('corroborate', () => {
     // dressed as a measurement.
     expect(
       corroborate([
-        c('timeapi', 60_000, 40),
-        c('device', 60_030, 40),
+        c('device', 60_000, 40),
+        c('google', 60_030, 40),
         c('cloudflare', 0, 40),
         c('pages-date', 20, 520),
       ]),
@@ -120,9 +122,9 @@ describe('corroborate', () => {
 
   it('is independent of the order sources answered in', () => {
     const pool = [
-      c('timeapi', -1_100_744, 30),
+      c('device', -1_100_744, 30),
       c('cloudflare', 12, 40),
-      c('binance', -5, 60),
+      c('wikipedia', -5, 60),
       c('pages-date', 60, 520),
     ]
     const forward = corroborate(pool)!

@@ -4,12 +4,20 @@
 // the round-trip around it.
 //
 // Every source here is treated as untrusted. On 2026-08-03 timeapi.io answered
-// HTTP 200 with well-formed JSON, ~170 ms RTT and a host clock 1100.7 s slow —
-// a falsetick in NTP's sense. Nothing about a single response distinguishes that
-// from a good one, so the defence lives in TimeSync: several sources are sampled
-// and only an instant that two of them corroborate is believed.
+// HTTP 200 with well-formed JSON, ~170 ms RTT and a host clock 1101 s slow, losing
+// a further 43 s/day — a falsetick in NTP's sense. Nothing about a single response
+// distinguishes that from a good one, so the defence lives in TimeSync: several
+// sources are sampled and only an instant that two of them corroborate is believed.
+//
+// The pool is constrained by what a browser can reach. A cross-origin response
+// header is unreadable unless the server sends CORS headers, and `Date` is not on
+// the CORS-safelist, so it is readable either same-origin or where a server names
+// it in `Access-Control-Expose-Headers`. Measured 2026-08-03: NIST's HTTP endpoints
+// time out or 404 and send no CORS headers; worldtimeapi.org is dead; the npm
+// registry, Postman Echo, api.weather.gov and www.gov.uk send no readable `Date`;
+// carbonintensity.org.uk resolves only to the half hour.
 
-export type SourceId = 'cloudflare' | 'pages-date' | 'binance' | 'timeapi' | 'device'
+export type SourceId = 'cloudflare' | 'pages-date' | 'google' | 'wikipedia' | 'device'
 
 export interface TimeSample {
   /** Server's true UTC at the moment it answered, epoch ms. */
@@ -25,92 +33,97 @@ export interface Source {
   fetch: (signal: AbortSignal) => Promise<TimeSample>
 }
 
+/** A whole-second server time, midpointed. A server reporting second D generated
+ *  the response somewhere in [D, D+1), so D + 500 ms is the unbiased estimate and
+ *  ±500 ms is the honest band. Same reasoning as the watch face in Drift.ts. */
+function wholeSecond(ms: number): TimeSample {
+  return { serverMs: ms + 500, floorMs: 500 }
+}
+
 /** Cloudflare's trace endpoint exposes `ts=` and sends `access-control-allow-origin: *`.
+ *  The pool's only sub-second source, so it usually supplies the point estimate.
  *  Most edges report milliseconds (`ts=1785722925.815`), but some truncate to a whole
- *  second (`ts=…034.000`), which would read 500 ms early. A whole-second value is
- *  therefore midpointed and given the matching ±500 ms floor. */
+ *  second (`ts=…034.000`), which would read 500 ms early, so a whole-second value is
+ *  midpointed like the others. */
 export async function fetchCloudflare(signal: AbortSignal): Promise<TimeSample> {
   const res = await fetch('https://cloudflare.com/cdn-cgi/trace', { signal, cache: 'no-store' })
   if (!res.ok) throw new Error(`cloudflare ${res.status}`)
   const m = (await res.text()).match(/^ts=(\d+)(?:\.(\d+))?/m)
   if (!m) throw new Error('cloudflare: no ts field')
   const whole = Number(m[1]) * 1000
-  const frac = m[2] ? Number(`0.${m[2]}`) * 1000 : 0
   if (!Number.isFinite(whole)) throw new Error('cloudflare: unparseable ts')
-  return frac > 0
-    ? { serverMs: whole + frac, floorMs: 10 }
-    : { serverMs: whole + 500, floorMs: 500 }
+  const frac = m[2] ? Number(`0.${m[2]}`) * 1000 : 0
+  return frac > 0 ? { serverMs: whole + frac, floorMs: 10 } : wholeSecond(whole)
 }
 
-/** Same-origin `Date` header. Same-origin means it is readable without CORS
- *  exposure (`Date` is not on the CORS-safelist, so this only works on our own
- *  origin), but it is whole-second resolution — so we midpoint the second and
- *  floor the band at 500 ms. Verified 2026-08-03 that GitHub Pages' CDN rewrites
- *  `Date` to the serving instant even on a cache HIT (`Date` advanced in step with
- *  real time while `Age` climbed to 153 s), so no `Age` correction is applied. */
+/** Same-origin `Date` header, readable without CORS exposure. This source is the
+ *  pool's floor: a visitor who can load the page can always read it. Verified
+ *  2026-08-03 that GitHub Pages' CDN rewrites `Date` to the serving instant even on
+ *  a cache HIT (`Date` advanced in step with real time while `Age` climbed to 153 s),
+ *  so no `Age` correction is applied. */
 export async function fetchPagesDate(signal: AbortSignal): Promise<TimeSample> {
   const res = await fetch(location.href, { method: 'HEAD', signal, cache: 'no-store' })
-  const date = res.headers.get('Date')
-  if (!date) throw new Error('pages-date: not exposed')
-  const ms = Date.parse(date)
-  if (!Number.isFinite(ms)) throw new Error('pages-date: unparseable')
-  return { serverMs: ms + 500, floorMs: 500 }
+  return wholeSecond(parseDateHeader(res, 'pages-date'))
 }
 
-interface BinanceResponse {
-  serverTime: number
-}
-
-/** Millisecond-resolution and CORS-enabled. An exchange's matching engine is
- *  disciplined to UTC as a condition of operating, which makes this a useful
- *  independent check on the other two. Geo-blocked in some regions (HTTP 451),
- *  which costs us a voter there and nothing else. */
-export async function fetchBinance(signal: AbortSignal): Promise<TimeSample> {
-  const res = await fetch('https://api.binance.com/api/v3/time', { signal, cache: 'no-store' })
-  if (!res.ok) throw new Error(`binance ${res.status}`)
-  const j = (await res.json()) as BinanceResponse
-  if (!Number.isFinite(j.serverTime)) throw new Error('binance: unparseable time')
-  return { serverMs: j.serverTime, floorMs: 1 }
-}
-
-interface TimeapiResponse {
-  year: number
-  month: number
-  day: number
-  hour: number
-  minute: number
-  seconds: number
-  milliSeconds: number
-}
-
-/** Kept as a fourth voter rather than removed: it was the falseticker of
- *  2026-08-03, and under corroboration a wrong source is outvoted instead of
- *  believed. Should its clock be repaired it rejoins the quorum on its own. */
-export async function fetchTimeapi(signal: AbortSignal): Promise<TimeSample> {
-  const res = await fetch('https://timeapi.io/api/time/current/zone?timeZone=Etc/UTC', {
+/** Google's API front end names `date` in `Access-Control-Expose-Headers`, which
+ *  is what makes its clock readable from a browser at all; almost nothing else
+ *  does. The discovery endpoint is unauthenticated and `fields=kind` trims the
+ *  body to a couple of dozen bytes, since only the header is wanted. */
+export async function fetchGoogle(signal: AbortSignal): Promise<TimeSample> {
+  const res = await fetch('https://www.googleapis.com/discovery/v1/apis?fields=kind', {
     signal,
     cache: 'no-store',
   })
-  if (!res.ok) throw new Error(`timeapi ${res.status}`)
-  const j = (await res.json()) as TimeapiResponse
-  const serverMs = Date.UTC(j.year, j.month - 1, j.day, j.hour, j.minute, j.seconds, j.milliSeconds)
-  if (!Number.isFinite(serverMs)) throw new Error('timeapi: unparseable time')
-  return { serverMs, floorMs: 1 }
+  if (!res.ok) throw new Error(`google ${res.status}`)
+  return wholeSecond(parseDateHeader(res, 'google'))
 }
 
-/** The pool. Order is presentational only — every source is sampled in parallel
- *  and none of them can carry an estimate alone. */
+interface ExpandTemplatesResponse {
+  expandtemplates?: { wikitext?: string }
+}
+
+/** MediaWiki expands {{CURRENTTIMESTAMP}} to the serving host's UTC clock as
+ *  YYYYMMDDHHMMSS. `origin=*` is what makes MediaWiki send the wildcard CORS
+ *  header for an anonymous request. Wikimedia is the pool's one non-commercial
+ *  operator, which is worth something when the whole point is independence. */
+export async function fetchWikipedia(signal: AbortSignal): Promise<TimeSample> {
+  const url =
+    'https://en.wikipedia.org/w/api.php?action=expandtemplates' +
+    '&text=%7B%7BCURRENTTIMESTAMP%7D%7D&prop=wikitext&format=json&origin=*'
+  const res = await fetch(url, { signal, cache: 'no-store' })
+  if (!res.ok) throw new Error(`wikipedia ${res.status}`)
+  const j = (await res.json()) as ExpandTemplatesResponse
+  const m = j.expandtemplates?.wikitext?.match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})$/)
+  if (!m) throw new Error('wikipedia: unparseable timestamp')
+  const ms = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6])
+  if (!Number.isFinite(ms)) throw new Error('wikipedia: unparseable timestamp')
+  return wholeSecond(ms)
+}
+
+function parseDateHeader(res: Response, id: SourceId): number {
+  const date = res.headers.get('Date')
+  if (!date) throw new Error(`${id}: Date not exposed`)
+  const ms = Date.parse(date)
+  if (!Number.isFinite(ms)) throw new Error(`${id}: unparseable Date`)
+  return ms
+}
+
+/** The pool. Order is presentational only, since every source is sampled in
+ *  parallel and none of them can carry an estimate alone. Four unrelated
+ *  operators — a CDN, the host serving this page, Google and the Wikimedia
+ *  Foundation — so a quorum of two survives two failing at once. */
 export const SOURCES: Source[] = [
   { id: 'cloudflare', label: 'Cloudflare', fetch: fetchCloudflare },
   { id: 'pages-date', label: 'the server clock', fetch: fetchPagesDate },
-  { id: 'binance', label: 'Binance', fetch: fetchBinance },
-  { id: 'timeapi', label: 'timeapi.io', fetch: fetchTimeapi },
+  { id: 'google', label: 'Google', fetch: fetchGoogle },
+  { id: 'wikipedia', label: 'Wikipedia', fetch: fetchWikipedia },
 ]
 
 export const SOURCE_LABELS: Record<SourceId, string> = {
   cloudflare: 'Cloudflare',
   'pages-date': 'the server clock',
-  binance: 'Binance',
-  timeapi: 'timeapi.io',
+  google: 'Google',
+  wikipedia: 'Wikipedia',
   device: 'this device',
 }

@@ -68,13 +68,21 @@ ours, and the second half is the part worth keeping notes on.
 
 `timeapi.io` was first in a first-success chain, and its host clock was set 1101 s
 behind while everything observable about it looked healthy: HTTP 200, well-formed
-JSON, ~170 ms round-trip, milliseconds advancing at the correct rate (14 ms of
-rate error measured over 13 s). Its own `nginx/1.29.4` `Date:` header carried the
-same 1101 s error, so the operating system clock on that host was wrong rather
-than the application's date handling. Cloudflare, Binance and GitHub's own servers
-all agreed with each other to within ~50 ms throughout. No public incident report
-existed, and uptime monitors listed the service as up — which they would, since an
-HTTP 200 from a wrong clock passes every availability check ever written.
+JSON, ~170 ms round-trip. Its own `nginx/1.29.4` `Date:` header carried the same
+1101 s error, so the operating system clock on that host was wrong rather than the
+application's date handling. Cloudflare, Google and GitHub's own servers all agreed
+with each other to within ~50 ms throughout. No public incident report existed, and
+uptime monitors listed the service as up — which they would, since an HTTP 200 from
+a wrong clock passes every availability check ever written.
+
+Measuring over 26 minutes showed the host is also free-running. Its error grew from
+1100.744 s to 1101.531 s, a rate of −500 ppm or −43.2 s/day, which is very poor for
+a physical crystal and more typical of a virtual machine with no NTP client. That
+rate accounts for the magnitude: 1101 s of accumulated error at 43.2 s/day is 25.5
+days of free-running. An earlier reading of this as a single step change came from
+a 13-second sample window, over which 500 ppm accumulates 6.5 ms and hides inside
+the round-trip noise. For scale, the F-91W being measured is specified at ±30 s per
+month, and the server grading it loses roughly 1,300 s per month.
 
 Two design faults let it through, both now fixed:
 
@@ -99,11 +107,30 @@ the night before. `TimeSync` now stamps each offset, treats one older than
 `MAX_AGE_MS` (5 min) as stale, and re-checks on a timer, when the tab becomes
 visible again (mobile suspend), and before a scan starts.
 
-`timeapi.io` was kept in the pool rather than deleted. Under corroboration a wrong
-source is outvoted instead of believed, and it rejoins the quorum by itself if the
-host is ever repaired. Browser-reachable sources are scarce: `Date` is not a
-CORS-safelisted response header, so cross-origin `Date` is unreadable and only
-same-origin works, and `worldtimeapi.org` was dead when tested.
+`timeapi.io` was removed from the pool. It was briefly kept on the grounds that a
+wrong source is outvoted rather than believed and would rejoin the quorum if
+repaired, but a clock free-running at −500 ppm will not self-repair and only moves
+further away, so it was three wasted requests per sync.
+
+Choosing replacements was constrained by what a browser can reach, which is a much
+smaller set than it appears. A cross-origin response header is unreadable unless
+the server sends CORS headers, and `Date` is not on the CORS-safelist, so it is
+readable either same-origin or where a server names it in
+`Access-Control-Expose-Headers`. Tested and rejected on 2026-08-03: NIST's HTTP
+endpoints (`time.nist.gov/actualtime.cgi` timed out at 12 s, `nist.time.gov`
+returned 404, neither sends CORS headers); `worldtimeapi.org` (dead); the npm
+registry, Postman Echo, `api.weather.gov` and `www.gov.uk` (no readable `Date`);
+`carbonintensity.org.uk` (half-hour resolution). Exchange APIs do work, since
+building browser trading UIs forces them to enable CORS, but the pool avoids them
+by preference.
+
+The four chosen sources are unrelated operators: Cloudflare's trace endpoint (the
+only sub-second source, so it usually supplies the point estimate), this page's own
+origin, Google's API front end (which is unusual in naming `date` in its expose
+list), and Wikipedia via MediaWiki's `{{CURRENTTIMESTAMP}}`. Three of the four
+resolve only to the whole second, so the reported band typically sits near ±500 ms;
+since the watch face is itself quantised to a second and the answer is rounded, the
+displayed figure is unaffected.
 
 ## How to run
 ```sh
@@ -118,7 +145,7 @@ Deploy: push to `main` → GitHub Actions builds and publishes to Pages.
 ## Key files
 - `src/ui/Screen.ts` — the single-screen state machine (idle/preview/measuring/result/retake/errors), `?debug=1` view, live `W/H` box controls.
 - `src/camera/Camera.ts` — getUserMedia rear camera + frame capture/timestamp.
-- `src/time/TimeSync.ts`, `src/time/sources.ts` — RTT-compensated offset; four sources sampled in parallel (Cloudflare, same-origin `Date`, Binance, timeapi.io) and believed only where two bands agree. Falls back to the device clock, marked, when they don't.
+- `src/time/TimeSync.ts`, `src/time/sources.ts` — RTT-compensated offset; four sources sampled in parallel (Cloudflare, same-origin `Date`, Google, Wikipedia) and believed only where two bands agree. Falls back to the device clock, marked, when they don't.
 - `src/drift/Drift.ts` (+ `.test.ts`) — signed offset, nearest difference mod 12h/24h.
 - `src/recognize/`
   - `Recognizer.ts` — engine interface (swappable).
