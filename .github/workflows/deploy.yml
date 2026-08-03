@@ -17,7 +17,36 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # The gate: nothing reaches the live site until the suite passes on the exact
+  # commit being deployed.
+  #
+  # This repeats ci.yml deliberately. ci.yml also runs on push to main, but it is a
+  # separate workflow triggered independently by the same push, so a failure there
+  # cannot stop this one. Until this job existed, a push carrying a failing test
+  # deployed regardless; only a broken build stopped it, because `build` below runs
+  # tsc itself. Repeating the suite costs roughly twenty seconds per deploy.
+  #
+  # A separate job rather than an extra step inside `build`, so the dependency is
+  # structural: `needs: test` cannot be defeated by someone reordering steps.
+  #
+  # It also covers the Dependabot path. dependabot-auto-merge.yml dispatches this
+  # workflow after squash-merging, since a GITHUB_TOKEN merge does not re-trigger
+  # `on: push`, so this runs the suite against the squashed commit on main rather
+  # than trusting the PR head that CI saw.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build # tsc typecheck + vite production build
+      - run: npm test # Vitest (drift, time-sync, parser)
+
   build:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
