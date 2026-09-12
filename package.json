@@ -14,7 +14,7 @@
     "harness": "node --experimental-strip-types tools/ocr-harness.ts"
   },
   "devDependencies": {
-    "@napi-rs/canvas": "^1.0.8",
+    "@napi-rs/canvas": "^1.0.9",
     "typescript": "^7.0.2",
     "vite": "^8.2.2",
     "vitest": "^4.1.11"
